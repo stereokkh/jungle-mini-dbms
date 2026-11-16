@@ -1,6 +1,5 @@
 #include "statement.h"
 
-#include <stdio.h>
 #include <string.h>
 
 // 파싱하는 동안 "지금 몇 번째 토큰을 보고 있는지"를 들고 다닌다.
@@ -30,27 +29,16 @@ static DbStatus syntax_error(const Parser *p, const char *expected, DbError *err
 {
     const Token *t = peek(p);
 
-    err->code = DB_ERR_SYNTAX;
-    err->pos = t->pos;
     if (t->type == TOK_EOF) {
-        snprintf(err->message, sizeof err->message,
-                 "Syntax error at position %d: expected %s, but got end of input",
-                 t->pos, expected);
-    } else {
-        // 긴 문자열 토큰이 메시지를 다 차지하지 않게 앞의 40바이트만 보여 준다.
-        snprintf(err->message, sizeof err->message,
-                 "Syntax error at position %d: expected %s, but got '%.40s'",
-                 t->pos, expected, t->text);
+        return error_set(err, DB_ERR_SYNTAX, t->pos, "expected %s, but got end of input", expected);
     }
-    return DB_ERR_SYNTAX;
+    // 긴 문자열 토큰이 메시지를 다 차지하지 않게 앞의 40바이트만 보여 준다.
+    return error_set(err, DB_ERR_SYNTAX, t->pos, "expected %s, but got '%.40s'", expected, t->text);
 }
 
 static DbStatus too_long(const Parser *p, const char *what, int limit, DbError *err)
 {
-    err->code = DB_ERR_TOO_LONG;
-    err->pos = peek(p)->pos;
-    snprintf(err->message, sizeof err->message, "Error: %s (limit is %d)", what, limit);
-    return DB_ERR_TOO_LONG;
+    return error_set(err, DB_ERR_TOO_LONG, peek(p)->pos, "%s (limit is %d)", what, limit);
 }
 
 // 지금 토큰이 type 이면 넘어가고, 아니면 문법 오류다.
@@ -195,10 +183,7 @@ DbStatus parse(const Token *toks, int count, Statement *stmt, DbError *err)
     // 앞 문장의 값이 남아 있으면 select_all, has_where 같은 표시가 잘못 켜진 채로 나간다.
     memset(stmt, 0, sizeof *stmt);
     if (count <= 0) {
-        err->code = DB_ERR_SYNTAX;
-        err->pos = -1;
-        snprintf(err->message, sizeof err->message, "Syntax error: empty statement");
-        return DB_ERR_SYNTAX;
+        return error_set(err, DB_ERR_SYNTAX, -1, "empty statement");
     }
 
     if (peek(&p)->type == TOK_INSERT) {

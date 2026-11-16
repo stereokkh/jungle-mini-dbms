@@ -39,7 +39,7 @@ jungle-mini-dbms/
 ├── Makefile      (기존 것 그대로. make / make test / make asan / make clean)
 ├── docs/         phase1-design.md
 ├── src/          error.h  token.h  statement.h  schema.h  db.h  storage.h  executor.h
-│                 tokenizer.c  parser.c  schema.c  db.c  storage.c  executor.c  main.c
+│                 error.c  tokenizer.c  parser.c  schema.c  db.c  storage.c  executor.c  main.c
 ├── tests/        test_tokenizer.c  test_parser.c  test_storage.c  test_executor.c
 └── data/         users.schema  (users.csv 는 실행하면 생긴다)
 ```

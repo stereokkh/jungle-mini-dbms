@@ -3,32 +3,10 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-
-// 오류를 채우고 그 코드를 그대로 돌려준다. `return fail(...)` 한 줄로 빠져나가기 위한 모양이다.
-static DbStatus fail(DbError *err, DbStatus code, int pos, const char *fmt, ...)
-{
-    char detail[200];
-    va_list args;
-
-    va_start(args, fmt);
-    vsnprintf(detail, sizeof detail, fmt, args);
-    va_end(args);
-
-    err->code = code;
-    err->pos = pos;
-    if (code == DB_ERR_SYNTAX) {
-        snprintf(err->message, sizeof err->message,
-                 "Syntax error at position %d: %s", pos, detail);
-    } else {
-        snprintf(err->message, sizeof err->message, "Error: %s", detail);
-    }
-    return code;
-}
 
 // ctype 함수에 음수(한글 바이트 등)를 넘기면 정의되지 않은 동작이라 unsigned char 로 바꿔서 넘긴다.
 static int is_name_start(char c)
@@ -75,8 +53,8 @@ static DbStatus read_word(const char *sql, int *p, Token *t, DbError *err)
         len++;
     }
     if (len > max_len) {
-        return fail(err, DB_ERR_TOO_LONG, start,
-                    "name is longer than %d characters", max_len);
+        return error_set(err, DB_ERR_TOO_LONG, start,
+                         "name is longer than %d characters", max_len);
     }
     memcpy(t->text, sql + start, (size_t)len);
     t->text[len] = '\0';
@@ -97,14 +75,14 @@ static DbStatus read_integer(const char *sql, int *p, Token *t, DbError *err)
         len++;
     }
     if (len > max_len) {
-        return fail(err, DB_ERR_TOO_LONG, start,
-                    "number is longer than %d characters", max_len);
+        return error_set(err, DB_ERR_TOO_LONG, start,
+                         "number is longer than %d characters", max_len);
     }
     // 직접 곱하고 더하면 넘침 검사를 손으로 써야 한다. strtoll 은 넘치면 errno 로 알려 준다.
     errno = 0;
     t->int_value = strtoll(sql + start, &end, 10);
     if (errno == ERANGE) {
-        return fail(err, DB_ERR_SYNTAX, start, "integer is out of range");
+        return error_set(err, DB_ERR_SYNTAX, start, "integer is out of range");
     }
     memcpy(t->text, sql + start, (size_t)len);
     t->text[len] = '\0';
@@ -123,7 +101,7 @@ static DbStatus read_string(const char *sql, int *p, Token *t, DbError *err)
 
     for (;;) {
         if (sql[i] == '\0') {
-            return fail(err, DB_ERR_SYNTAX, start, "unterminated string");
+            return error_set(err, DB_ERR_SYNTAX, start, "unterminated string");
         }
         if (sql[i] == '\'') {
             if (sql[i + 1] != '\'') {
@@ -132,8 +110,8 @@ static DbStatus read_string(const char *sql, int *p, Token *t, DbError *err)
             i++;            // '' 의 첫 번째는 건너뛰고 두 번째를 글자로 담는다
         }
         if (len >= max_len) {
-            return fail(err, DB_ERR_TOO_LONG, start,
-                        "string is longer than %d bytes", max_len);
+            return error_set(err, DB_ERR_TOO_LONG, start,
+                             "string is longer than %d bytes", max_len);
         }
         t->text[len++] = sql[i++];
     }
@@ -157,9 +135,9 @@ static DbStatus read_symbol(const char *sql, int *p, Token *t, DbError *err)
     case '=': t->type = TOK_EQ;        break;
     default:
         if (isprint((unsigned char)c)) {
-            return fail(err, DB_ERR_SYNTAX, *p, "unexpected character '%c'", c);
+            return error_set(err, DB_ERR_SYNTAX, *p, "unexpected character '%c'", c);
         }
-        return fail(err, DB_ERR_SYNTAX, *p, "unexpected byte 0x%02X", (unsigned char)c);
+        return error_set(err, DB_ERR_SYNTAX, *p, "unexpected byte 0x%02X", (unsigned char)c);
     }
     t->text[0] = c;
     t->text[1] = '\0';
@@ -202,7 +180,7 @@ DbStatus tokenize_next(const char *sql, int *pos, Token *out, int max, int *coun
 
     while (!done) {
         if (n >= max) {
-            return fail(err, DB_ERR_TOO_LONG, p, "statement has more than %d tokens", max);
+            return error_set(err, DB_ERR_TOO_LONG, p, "statement has more than %d tokens", max);
         }
         Token *t = &out[n++];
         DbStatus status = next_token(sql, &p, t, err);
@@ -214,7 +192,7 @@ DbStatus tokenize_next(const char *sql, int *pos, Token *out, int max, int *coun
         // ; 는 문장의 끝이다. 뒤의 글자는 다음 호출이 읽도록 남겨 두고, 여기서 EOF 를 붙여 끝낸다.
         if (t->type == TOK_SEMICOLON) {
             if (n >= max) {
-                return fail(err, DB_ERR_TOO_LONG, p, "statement has more than %d tokens", max);
+                return error_set(err, DB_ERR_TOO_LONG, p, "statement has more than %d tokens", max);
             }
             out[n++] = (Token){ .type = TOK_EOF, .pos = p };
             done = 1;
