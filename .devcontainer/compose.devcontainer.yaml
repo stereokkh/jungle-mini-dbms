@@ -1,0 +1,11 @@
+# devcontainer 에서만 덧붙는 compose 설정.
+name: jungle-mini-dbms
+
+services:
+  dev:
+    volumes:
+      # Claude Code 로그인 정보·설정 (CLAUDE_CONFIG_DIR). 컨테이너를 리빌드해도 남는다.
+      - claude-config:/claude-config
+
+volumes:
+  claude-config:

@@ -1,0 +1,28 @@
+{
+  // VS Code 를 compose 의 dev 컨테이너 안에서 연다.
+  // C 언어 서버(cpptools)가 컨테이너의 gcc 와 /usr/include 를 직접 보게 하는 것이 목적.
+  "name": "mini-dbms (dev)",
+
+  "dockerComposeFile": ["../compose.yaml", "compose.devcontainer.yaml"],
+  "service": "dev",
+  "runServices": ["dev"],
+  "workspaceFolder": "/workspace",
+
+  // dev 서비스는 CMD 가 bash 라서 바로 종료된다. sleep 루프로 바꿔 컨테이너를 살려 둔다.
+  "overrideCommand": true,
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-vscode.cpptools"],
+      // Makefile 의 CFLAGS_BASE 와 같은 조건으로 분석하게 한다.
+      "settings": {
+        "C_Cpp.default.compilerPath": "/usr/bin/gcc",
+        "C_Cpp.default.cStandard": "c11",
+        "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
+        "C_Cpp.default.defines": ["_GNU_SOURCE"],
+        "C_Cpp.default.includePath": ["${workspaceFolder}/src"],
+        "files.eol": "\n"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+.DS_Store
+/build/
+*.o
+
+# 테스트 중 생성되는 DB 파일
+*.db
+
+# Claude Code / AI 작업 산출물 (저장소에 올리지 않음)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json
+.ai/
