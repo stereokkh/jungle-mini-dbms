@@ -35,7 +35,7 @@ VS Code를 쓴다면 Dev Containers 확장으로 **Reopen in Container**를 눌�
 
 ```sh
 make            # build/mini-dbms
-./build/mini-dbms
+./build/mini-dbms queries.sql   # data/ 의 테이블에 SQL 파일을 실행
 make test       # tests/test_*.c 를 각각 빌드해서 실행
 make asan       # AddressSanitizer/UBSan 으로 테스트
 make clean
