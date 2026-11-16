@@ -200,6 +200,34 @@ static void test_unexpected_character(void)
     assert(tokenize_one("SELECT 이름", t, &count, &err) == DB_ERR_SYNTAX);
 }
 
+static void test_operators(void)
+{
+    Token t[MAX_TOKENS];
+    DbError err;
+    int count = 0;
+    TokenType expected[] = {
+        TOK_EQ, TOK_NE, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,
+        TOK_AND, TOK_OR, TOK_NOT, TOK_EOF
+    };
+
+    assert(tokenize_one("= != <> < > <= >= AND or Not", t, &count, &err) == DB_OK);
+    assert(count == 11);
+    for (int i = 0; i < count; i++) {
+        assert(t[i].type == expected[i]);
+    }
+    assert(strcmp(t[5].text, "<=") == 0);
+
+    // 붙여 써도 나뉜다. <= 뒤의 -5 는 음수 하나다
+    assert(tokenize_one("a<=-5", t, &count, &err) == DB_OK);
+    assert(count == 4 && t[1].type == TOK_LE && t[2].type == TOK_INTEGER && t[2].int_value == -5);
+    assert(tokenize_one("a<b", t, &count, &err) == DB_OK);
+    assert(count == 4 && t[1].type == TOK_LT);
+
+    // ! 혼자는 기호가 아니다
+    assert(tokenize_one("a ! 1", t, &count, &err) == DB_ERR_SYNTAX);
+    assert(err.pos == 2);
+}
+
 int main(void)
 {
     test_insert_statement();
@@ -211,6 +239,7 @@ int main(void)
     test_limits();
     test_empty_inputs();
     test_unexpected_character();
+    test_operators();
     printf("test_tokenizer: ok\n");
     return 0;
 }

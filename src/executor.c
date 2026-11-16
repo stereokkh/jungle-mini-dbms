@@ -154,17 +154,88 @@ static DbStatus run_insert(Table *t, const Statement *stmt, ExecResult *result, 
 
 // ---------- SELECT ----------
 
+// 검사 순서 5: 조건 트리의 모든 컬럼이 스키마에 있는지 본다.
+static DbStatus check_cond_columns(const Table *t, const Cond *c, DbError *err)
+{
+    if (c == NULL) {
+        return DB_OK;
+    }
+    if (c->type == COND_COMPARE) {
+        if (find_column(&t->schema, c->column) < 0) {
+            return error_set(err, DB_ERR_NO_COLUMN, -1, "column '%s' does not exist in table '%s'",
+                             c->column, t->name);
+        }
+        return DB_OK;
+    }
+    DbStatus st = check_cond_columns(t, c->left, err);
+    if (st != DB_OK) {
+        return st;
+    }
+    return check_cond_columns(t, c->right, err);
+}
+
+// 검사 순서 6: 조건 트리의 모든 비교에서 값의 종류가 컬럼 타입과 맞는지 본다.
+// check_cond_columns 를 통과한 뒤에 부르므로 컬럼은 반드시 찾아진다.
+static DbStatus check_cond_types(const Schema *s, const Cond *c, DbError *err)
+{
+    if (c == NULL) {
+        return DB_OK;
+    }
+    if (c->type == COND_COMPARE) {
+        return check_type(&s->cols[find_column(s, c->column)], &c->value, err);
+    }
+    DbStatus st = check_cond_types(s, c->left, err);
+    if (st != DB_OK) {
+        return st;
+    }
+    return check_cond_types(s, c->right, err);
+}
+
+// a 가 b 보다 작으면 음수, 같으면 0, 크면 양수.
+// INT 는 숫자로, TEXT 는 글자 그대로(바이트 순서, 대소문자 구분) 비교한다.
+// 두 값의 종류가 같다는 것은 check_cond_types 와 저장소가 이미 확인했다.
+static int compare_values(const Value *a, const Value *b)
+{
+    if (a->type == VAL_INT) {
+        return (a->i > b->i) - (a->i < b->i);   // a - b 는 넘칠 수 있어서 쓰지 않는다
+    }
+    return strcmp(a->s, b->s);
+}
+
+// 행 하나(fields)가 조건 트리 c 를 만족하면 1, 아니면 0.
+// 가지는 자식의 결과를 합치고, 잎은 그 행의 컬럼 값과 조건의 값을 비교한다.
+static int cond_matches(const Schema *s, const Cond *c, const Value *fields)
+{
+    switch (c->type) {
+    case COND_AND: return cond_matches(s, c->left, fields) && cond_matches(s, c->right, fields);
+    case COND_OR:  return cond_matches(s, c->left, fields) || cond_matches(s, c->right, fields);
+    case COND_NOT: return !cond_matches(s, c->left, fields);
+    case COND_COMPARE: break;
+    }
+
+    int cmp = compare_values(&fields[find_column(s, c->column)], &c->value);
+    switch (c->op) {
+    case OP_EQ: return cmp == 0;
+    case OP_NE: return cmp != 0;
+    case OP_LT: return cmp < 0;
+    case OP_GT: return cmp > 0;
+    case OP_LE: return cmp <= 0;
+    case OP_GE: return cmp >= 0;
+    }
+    return 0;
+}
+
 // 저장소가 줄마다 콜백을 부를 때 필요한 것을 모아 둔 것.
-// 컬럼 이름을 줄마다 다시 찾지 않도록, 훑기 전에 위치(번호)로 바꿔 둔다.
+// 고른 컬럼은 줄마다 이름으로 다시 찾지 않도록, 훑기 전에 위치(번호)로 바꿔 둔다.
 typedef struct {
-    int          select_all;
-    int          cols[16];      // 고른 컬럼의 위치, 고른 순서대로
-    int          col_count;
-    int          where_col;     // 조건 컬럼의 위치. 조건이 없으면 -1
-    const Value *where_value;
-    RowCallback  on_row;
-    void        *ctx;
-    int          row_count;
+    const Schema *schema;
+    int           select_all;
+    int           cols[16];     // 고른 컬럼의 위치, 고른 순서대로
+    int           col_count;
+    const Cond   *where;        // 조건 트리. 조건이 없으면 NULL
+    RowCallback   on_row;
+    void         *ctx;
+    int           row_count;
 } SelectPlan;
 
 // 검사 순서 5~6: 고른 컬럼과 WHERE 컬럼이 있는지 → WHERE 값의 종류
@@ -172,9 +243,10 @@ static DbStatus plan_select(const Table *t, const Statement *stmt, SelectPlan *p
 {
     const Schema *s = &t->schema;
 
+    plan->schema = s;
     plan->select_all = stmt->select_all;
     plan->col_count = stmt->column_count;
-    plan->where_col = -1;
+    plan->where = stmt->where;
     plan->row_count = 0;
 
     for (int i = 0; i < stmt->column_count; i++) {
@@ -184,26 +256,11 @@ static DbStatus plan_select(const Table *t, const Statement *stmt, SelectPlan *p
                              stmt->columns[i], t->name);
         }
     }
-    if (!stmt->has_where) {
-        return DB_OK;
+    DbStatus st = check_cond_columns(t, stmt->where, err);
+    if (st != DB_OK) {
+        return st;
     }
-    plan->where_col = find_column(s, stmt->where.column);
-    if (plan->where_col < 0) {
-        return error_set(err, DB_ERR_NO_COLUMN, -1, "column '%s' does not exist in table '%s'",
-                         stmt->where.column, t->name);
-    }
-    plan->where_value = &stmt->where.value;
-    return check_type(&s->cols[plan->where_col], plan->where_value, err);
-}
-
-// INT 는 숫자로, TEXT 는 글자 그대로(대소문자 구분) 비교한다.
-// 두 값의 종류가 같다는 것은 plan_select 와 저장소가 이미 확인했다.
-static int values_equal(const Value *a, const Value *b)
-{
-    if (a->type == VAL_INT) {
-        return a->i == b->i;
-    }
-    return strcmp(a->s, b->s) == 0;
+    return check_cond_types(s, stmt->where, err);
 }
 
 // storage_scan 콜백: 조건에 맞는 줄이면 고른 컬럼만 골라 on_row 로 넘긴다.
@@ -213,7 +270,7 @@ static int select_row(const Value *fields, int field_count, long offset, void *c
     Value picked[16];
 
     (void)offset;
-    if (plan->where_col >= 0 && !values_equal(&fields[plan->where_col], plan->where_value)) {
+    if (plan->where != NULL && !cond_matches(plan->schema, plan->where, fields)) {
         return 0;
     }
     plan->row_count++;

@@ -75,7 +75,9 @@ static DbStatus run_statement(Db *db, const Token *toks, int count, DbError *err
     DbStatus st;
 
     if ((st = parse(toks, count, &stmt, err)) != DB_OK) return st;
-    if ((st = execute(db, &stmt, print_row, NULL, &result, err)) != DB_OK) return st;
+    st = execute(db, &stmt, print_row, NULL, &result, err);
+    statement_free(&stmt);  // 실행이 실패해도 조건 트리는 해제한다
+    if (st != DB_OK) return st;
 
     if (stmt.type == STMT_INSERT) {
         printf("OK (id=%lld)\n", result.inserted_id);

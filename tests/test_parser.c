@@ -43,7 +43,7 @@ static void test_select_all(void)
     assert(s.type == STMT_SELECT);
     assert(strcmp(s.table, "users") == 0);
     assert(s.select_all == 1 && s.column_count == 0);
-    assert(s.has_where == 0);
+    assert(s.where == NULL);
 }
 
 static void test_select_columns_and_where(void)
@@ -55,14 +55,17 @@ static void test_select_columns_and_where(void)
     assert(s.select_all == 0 && s.column_count == 2);
     assert(strcmp(s.columns[0], "name") == 0);
     assert(strcmp(s.columns[1], "id") == 0);
-    assert(s.has_where == 1);
-    assert(strcmp(s.where.column, "id") == 0);
-    assert(s.where.op == '=');
-    assert(s.where.value.type == VAL_INT && s.where.value.i == 1);
+    assert(s.where != NULL && s.where->type == COND_COMPARE);
+    assert(strcmp(s.where->column, "id") == 0);
+    assert(s.where->op == OP_EQ);
+    assert(s.where->value.type == VAL_INT && s.where->value.i == 1);
+    statement_free(&s);
+    assert(s.where == NULL);
 
     assert(parse_sql("select * from users where name = 'Kim'", &s, &err) == DB_OK);
-    assert(s.has_where == 1);
-    assert(s.where.value.type == VAL_STR && strcmp(s.where.value.s, "Kim") == 0);
+    assert(s.where != NULL);
+    assert(s.where->value.type == VAL_STR && strcmp(s.where->value.s, "Kim") == 0);
+    statement_free(&s);
 }
 
 // 앞 문장의 결과가 다음 문장에 남으면 안 된다
@@ -72,8 +75,9 @@ static void test_statement_is_reset(void)
     DbError err;
 
     assert(parse_sql("SELECT * FROM users WHERE id = 1", &s, &err) == DB_OK);
+    statement_free(&s);
     assert(parse_sql("SELECT name FROM users", &s, &err) == DB_OK);
-    assert(s.select_all == 0 && s.has_where == 0 && s.column_count == 1);
+    assert(s.select_all == 0 && s.where == NULL && s.column_count == 1);
 }
 
 static void test_syntax_errors(void)
@@ -184,6 +188,111 @@ static void test_missing_eof(void)
     assert(parse(toks, 6, &s, &err) == DB_ERR_SYNTAX);  // "... 1 ," 에서 끊김
 }
 
+// 조건 하나짜리 잎인지, 컬럼 이름이 맞는지 본다
+static int is_leaf(const Cond *c, const char *column)
+{
+    return c != NULL && c->type == COND_COMPARE && strcmp(c->column, column) == 0
+        && c->left == NULL && c->right == NULL;
+}
+
+static void test_where_tree(void)
+{
+    Statement s;
+    DbError err;
+
+    // AND 가 OR 보다 먼저 묶인다: a OR (b AND c)
+    assert(parse_sql("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3", &s, &err) == DB_OK);
+    assert(s.where->type == COND_OR);
+    assert(is_leaf(s.where->left, "a"));
+    assert(s.where->right->type == COND_AND);
+    assert(is_leaf(s.where->right->left, "b") && is_leaf(s.where->right->right, "c"));
+    statement_free(&s);
+
+    // 괄호로 순서를 바꾼다: (a OR b) AND c
+    assert(parse_sql("SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = 3", &s, &err) == DB_OK);
+    assert(s.where->type == COND_AND);
+    assert(s.where->left->type == COND_OR);
+    assert(is_leaf(s.where->left->left, "a") && is_leaf(s.where->left->right, "b"));
+    assert(is_leaf(s.where->right, "c"));
+    statement_free(&s);
+
+    // 같은 연산자는 왼쪽부터 묶인다: (a AND b) AND c
+    assert(parse_sql("select * from t where a = 1 and b = 2 and c = 3", &s, &err) == DB_OK);
+    assert(s.where->type == COND_AND && s.where->left->type == COND_AND);
+    assert(is_leaf(s.where->left->left, "a") && is_leaf(s.where->right, "c"));
+    statement_free(&s);
+
+    // NOT 은 AND 보다 먼저 묶인다: (NOT a) AND b
+    assert(parse_sql("SELECT * FROM t WHERE NOT a = 1 AND b = 2", &s, &err) == DB_OK);
+    assert(s.where->type == COND_AND);
+    assert(s.where->left->type == COND_NOT && s.where->left->right == NULL);
+    assert(is_leaf(s.where->left->left, "a") && is_leaf(s.where->right, "b"));
+    statement_free(&s);
+
+    assert(parse_sql("SELECT * FROM t WHERE NOT NOT ((a = 1))", &s, &err) == DB_OK);
+    assert(s.where->type == COND_NOT && s.where->left->type == COND_NOT);
+    assert(is_leaf(s.where->left->left, "a"));
+    statement_free(&s);
+}
+
+static void test_where_operators(void)
+{
+    const struct { const char *text; CompareOp op; } cases[] = {
+        {"=", OP_EQ}, {"!=", OP_NE}, {"<>", OP_NE}, {"<", OP_LT},
+        {">", OP_GT}, {"<=", OP_LE}, {">=", OP_GE},
+    };
+    Statement s;
+    DbError err;
+    char sql[64];
+
+    for (int i = 0; i < 7; i++) {
+        snprintf(sql, sizeof sql, "SELECT * FROM t WHERE a %s -5", cases[i].text);
+        assert(parse_sql(sql, &s, &err) == DB_OK);
+        assert(is_leaf(s.where, "a") && s.where->op == cases[i].op);
+        assert(s.where->value.type == VAL_INT && s.where->value.i == -5);
+        statement_free(&s);
+    }
+}
+
+// 조건이 틀리면 문법 오류이고, 만들던 트리는 남지 않는다 (남으면 make asan 이 누수로 잡는다)
+static void test_where_errors(void)
+{
+    const char *bad[] = {
+        "SELECT * FROM t WHERE",
+        "SELECT * FROM t WHERE a = 1 AND",
+        "SELECT * FROM t WHERE a = 1 OR OR b = 2",
+        "SELECT * FROM t WHERE AND a = 1",
+        "SELECT * FROM t WHERE NOT",
+        "SELECT * FROM t WHERE a 1",
+        "SELECT * FROM t WHERE a = b",
+        "SELECT * FROM t WHERE ()",
+        "SELECT * FROM t WHERE a = 1)",
+        "SELECT * FROM t WHERE (a = 1 OR b = 2 c = 3)",
+        "SELECT * FROM t WHERE a = 1 AND (b = 2 OR (c = 3 AND d = 4) e",
+        "SELECT * FROM t WHERE a = 1 AND b = 2 abc",
+    };
+    Statement s;
+    DbError err;
+
+    for (int i = 0; i < (int)(sizeof bad / sizeof bad[0]); i++) {
+        assert(parse_sql(bad[i], &s, &err) == DB_ERR_SYNTAX);
+        assert(s.where == NULL);
+    }
+
+    assert(parse_sql("SELECT * FROM t WHERE (a = 1", &s, &err) == DB_ERR_SYNTAX);
+    assert(strcmp(err.message, "Syntax error at position 28: "
+                               "expected AND, OR or ')', but got end of input") == 0);
+    assert(parse_sql("SELECT * FROM t WHERE a 1", &s, &err) == DB_ERR_SYNTAX);
+    assert(strcmp(err.message, "Syntax error at position 24: "
+                               "expected comparison operator, but got '1'") == 0);
+
+    // 괄호를 여러 겹 쳐도 된다 (토큰 한도 안에서)
+    assert(parse_sql("SELECT * FROM t WHERE ((((((((((a = 1))))))))))", &s, &err) == DB_OK);
+    assert(is_leaf(s.where, "a"));
+    statement_free(&s);
+    statement_free(&s);     // 두 번 불러도 안전하다
+}
+
 int main(void)
 {
     test_insert();
@@ -191,6 +300,9 @@ int main(void)
     test_select_columns_and_where();
     test_statement_is_reset();
     test_syntax_errors();
+    test_where_tree();
+    test_where_operators();
+    test_where_errors();
     test_limits();
     test_long_name_token();
     test_missing_eof();

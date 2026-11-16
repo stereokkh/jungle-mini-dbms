@@ -65,7 +65,9 @@ static DbStatus run(Db *db, const char *sql, Rows *rows, ExecResult *result, DbE
     }
     assert(tokenize_next(sql, &pos, toks, MAX_TOKENS, &count, err) == DB_OK);
     assert(parse(toks, count, &stmt, err) == DB_OK);
-    return execute(db, &stmt, collect, rows, result, err);
+    DbStatus st = execute(db, &stmt, collect, rows, result, err);
+    statement_free(&stmt);
+    return st;
 }
 
 static void insert_ok(Db *db, const char *sql, long long expected_id)
@@ -292,6 +294,81 @@ static void test_widest_row(void)
     remove_db(dir, &db);
 }
 
+// 조건에 맞는 행의 id 를 이어 붙여 돌려준다. 예: "1,4"
+static const char *ids_where(Db *db, const char *where, char *out, size_t size)
+{
+    char sql[256];
+    Rows rows;
+    ExecResult res;
+    DbError err;
+    size_t len = 0;
+
+    snprintf(sql, sizeof sql, "SELECT id FROM users WHERE %s", where);
+    assert(run(db, sql, &rows, &res, &err) == DB_OK);
+    assert(res.row_count == rows.count);
+    out[0] = '\0';
+    for (int i = 0; i < rows.count; i++) {
+        len += (size_t)snprintf(out + len, size - len, "%s%lld", i > 0 ? "," : "", rows.rows[i][0].i);
+    }
+    return out;
+}
+
+static void test_where_tree(void)
+{
+    char dir[64], ids[64];
+    Db db;
+    Rows rows;
+    ExecResult res;
+    DbError err;
+
+    make_db(dir, sizeof dir, &db);
+    insert_ok(&db, "INSERT INTO users VALUES ('Kim', 20)", 1);
+    insert_ok(&db, "INSERT INTO users VALUES ('Lee', 31)", 2);
+    insert_ok(&db, "INSERT INTO users VALUES ('Park', 40)", 3);
+    insert_ok(&db, "INSERT INTO users VALUES ('Choi', 31)", 4);
+#define IDS(where) ids_where(&db, where, ids, sizeof ids)
+
+    // 비교 연산자
+    assert(strcmp(IDS("age = 31"), "2,4") == 0);
+    assert(strcmp(IDS("age != 31"), "1,3") == 0);
+    assert(strcmp(IDS("age <> 31"), "1,3") == 0);
+    assert(strcmp(IDS("age < 31"), "1") == 0);
+    assert(strcmp(IDS("age > 31"), "3") == 0);
+    assert(strcmp(IDS("age <= 31"), "1,2,4") == 0);
+    assert(strcmp(IDS("age >= 31"), "2,3,4") == 0);
+    assert(strcmp(IDS("age > 100"), "") == 0);
+
+    // TEXT 의 크기 비교는 글자(바이트) 순서다
+    assert(strcmp(IDS("name > 'Kim'"), "2,3") == 0);
+    assert(strcmp(IDS("name <= 'Kim'"), "1,4") == 0);
+    assert(strcmp(IDS("name != 'Kim'"), "2,3,4") == 0);
+
+    // AND, OR, NOT, 괄호
+    assert(strcmp(IDS("age = 31 AND name = 'Lee'"), "2") == 0);
+    assert(strcmp(IDS("name = 'Lee' OR name = 'Park'"), "2,3") == 0);
+    assert(strcmp(IDS("NOT age = 31"), "1,3") == 0);
+    assert(strcmp(IDS("NOT (name = 'Kim' OR name = 'Lee')"), "3,4") == 0);
+    assert(strcmp(IDS("id = 1 OR age = 31 AND name = 'Choi'"), "1,4") == 0);     // AND 먼저
+    assert(strcmp(IDS("(id = 1 OR age = 31) AND name = 'Choi'"), "4") == 0);
+    assert(strcmp(IDS("age >= 20 AND age <= 31 AND NOT id = 2"), "1,4") == 0);
+    assert(strcmp(IDS("id = 1 OR id = 2 OR id = 3 OR id = 4"), "1,2,3,4") == 0);
+#undef IDS
+
+    // 트리 어디에 있든 없는 컬럼과 타입 불일치를 잡는다. 컬럼 검사가 타입 검사보다 먼저다
+    assert(run(&db, "SELECT * FROM users WHERE id = 1 AND (age = 2 OR nope = 3)",
+               &rows, &res, &err) == DB_ERR_NO_COLUMN);
+    assert(strcmp(err.message, "Error: column 'nope' does not exist in table 'users'") == 0);
+    assert(run(&db, "SELECT * FROM users WHERE id = 'x' OR nope = 1",
+               &rows, &res, &err) == DB_ERR_NO_COLUMN);
+    assert(run(&db, "SELECT * FROM users WHERE id = 1 OR NOT name = 5",
+               &rows, &res, &err) == DB_ERR_TYPE);
+    assert(strcmp(err.message, "Error: column 'name' expects TEXT, but got INT") == 0);
+    assert(run(&db, "SELECT * FROM users WHERE age < 'a'", &rows, &res, &err) == DB_ERR_TYPE);
+    assert(rows.count == 0);
+
+    remove_db(dir, &db);
+}
+
 int main(void)
 {
     test_insert_and_select_all();
@@ -299,6 +376,7 @@ int main(void)
     test_text_round_trip();
     test_insert_errors();
     test_select_errors();
+    test_where_tree();
     test_reopen_continues_id();
     test_widest_row();
     printf("test_executor: ok\n");

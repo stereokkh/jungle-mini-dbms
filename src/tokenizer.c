@@ -30,6 +30,7 @@ static TokenType word_type(const char *word)
     const struct { const char *name; TokenType type; } keywords[] = {
         {"INSERT", TOK_INSERT}, {"INTO", TOK_INTO},     {"VALUES", TOK_VALUES},
         {"SELECT", TOK_SELECT}, {"FROM", TOK_FROM},     {"WHERE", TOK_WHERE},
+        {"AND", TOK_AND},       {"OR", TOK_OR},         {"NOT", TOK_NOT},
     };
     int n = (int)(sizeof keywords / sizeof keywords[0]);
 
@@ -121,28 +122,30 @@ static DbStatus read_string(const char *sql, int *p, Token *t, DbError *err)
     return DB_OK;
 }
 
-// 한 글자짜리 기호
+// 기호 하나. 표의 순서대로 맞춰 보므로 두 글자짜리(<=)를 한 글자짜리(<)보다 앞에 둔다.
 static DbStatus read_symbol(const char *sql, int *p, Token *t, DbError *err)
 {
+    const struct { const char *text; TokenType type; } symbols[] = {
+        {"!=", TOK_NE},    {"<>", TOK_NE},    {"<=", TOK_LE},   {">=", TOK_GE},
+        {"(", TOK_LPAREN}, {")", TOK_RPAREN}, {",", TOK_COMMA}, {";", TOK_SEMICOLON},
+        {"*", TOK_STAR},   {"=", TOK_EQ},     {"<", TOK_LT},    {">", TOK_GT},
+    };
+    int n = (int)(sizeof symbols / sizeof symbols[0]);
     char c = sql[*p];
 
-    switch (c) {
-    case '(': t->type = TOK_LPAREN;    break;
-    case ')': t->type = TOK_RPAREN;    break;
-    case ',': t->type = TOK_COMMA;     break;
-    case ';': t->type = TOK_SEMICOLON; break;
-    case '*': t->type = TOK_STAR;      break;
-    case '=': t->type = TOK_EQ;        break;
-    default:
-        if (isprint((unsigned char)c)) {
-            return error_set(err, DB_ERR_SYNTAX, *p, "unexpected character '%c'", c);
+    for (int i = 0; i < n; i++) {
+        size_t len = strlen(symbols[i].text);
+        if (strncmp(sql + *p, symbols[i].text, len) == 0) {
+            strcpy(t->text, symbols[i].text);
+            t->type = symbols[i].type;
+            *p += (int)len;
+            return DB_OK;
         }
-        return error_set(err, DB_ERR_SYNTAX, *p, "unexpected byte 0x%02X", (unsigned char)c);
     }
-    t->text[0] = c;
-    t->text[1] = '\0';
-    (*p)++;
-    return DB_OK;
+    if (isprint((unsigned char)c)) {
+        return error_set(err, DB_ERR_SYNTAX, *p, "unexpected character '%c'", c);
+    }
+    return error_set(err, DB_ERR_SYNTAX, *p, "unexpected byte 0x%02X", (unsigned char)c);
 }
 
 // 공백을 건너뛰고 토큰 하나를 읽는다. 입력이 끝났으면 TOK_EOF 를 만든다.

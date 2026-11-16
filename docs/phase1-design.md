@@ -21,7 +21,9 @@
 
 ## 범위와 규칙
 
-- 지원하는 문장: `INSERT INTO 테이블 VALUES (값, ...)`, `SELECT * 또는 컬럼들 FROM 테이블 [WHERE 컬럼 = 값]`
+- 지원하는 문장: `INSERT INTO 테이블 VALUES (값, ...)`, `SELECT * 또는 컬럼들 FROM 테이블 [WHERE 조건]`
+- WHERE 조건은 `컬럼 연산자 값` 비교를 `AND`, `OR`, `NOT`, 괄호로 묶은 것이다. 비교 연산자는 `=`, `!=`(`<>`도 같다), `<`, `>`, `<=`, `>=`다. 묶이는 순서는 `NOT` → `AND` → `OR`이고 괄호로 바꿀 수 있다. 예: `WHERE id = 1 OR age >= 30 AND NOT name = 'Kim'`
+- 비교의 왼쪽은 컬럼, 오른쪽은 값이어야 한다 (`1 = id`, `a = b`는 지원하지 않는다)
 - 타입은 `INT`와 `TEXT` 두 가지뿐이다
 - 키워드는 대소문자를 구분하지 않는다. 테이블·컬럼 이름과 문자열 값은 구분한다
 - 음수는 토크나이저가 `-` 바로 뒤에 숫자가 오면 `TOK_INTEGER` 하나로 읽는다
@@ -75,8 +77,10 @@ typedef struct {
 ```c
 typedef enum {
     TOK_INSERT, TOK_INTO, TOK_VALUES, TOK_SELECT, TOK_FROM, TOK_WHERE,
+    TOK_AND, TOK_OR, TOK_NOT,
     TOK_IDENTIFIER, TOK_INTEGER, TOK_STRING,
-    TOK_LPAREN, TOK_RPAREN, TOK_COMMA, TOK_SEMICOLON, TOK_STAR, TOK_EQ,
+    TOK_LPAREN, TOK_RPAREN, TOK_COMMA, TOK_SEMICOLON, TOK_STAR,
+    TOK_EQ, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,     // =  != (또는 <>)  <  >  <=  >=
     TOK_EOF
 } TokenType;
 
@@ -101,11 +105,29 @@ typedef struct {
     };
 } Value;
 
-typedef struct {
-    char  column[64];
-    char  op;             // '=' 만 지원
-    Value value;
-} Where;
+typedef enum { OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE } CompareOp;   // =  !=  <  >  <=  >=
+
+typedef enum {
+    COND_COMPARE,   // 잎: 컬럼 op 값
+    COND_AND,       // 가지: left AND right
+    COND_OR,        // 가지: left OR right
+    COND_NOT        // 가지: NOT left (right 는 쓰지 않는다)
+} CondType;
+
+// WHERE 조건 트리의 노드 하나. malloc 으로 만들고 포인터로 잇는다.
+// 잎(COND_COMPARE)은 column/op/value 를 쓰고, 가지는 left/right 를 쓴다.
+typedef struct Cond {
+    CondType     type;
+
+    // COND_COMPARE
+    char         column[64];
+    CompareOp    op;
+    Value        value;
+
+    // COND_AND, COND_OR, COND_NOT
+    struct Cond *left;
+    struct Cond *right;
+} Cond;
 
 typedef struct {
     StmtType type;
@@ -120,11 +142,26 @@ typedef struct {
     Value    values[16];
     int      value_count;
 
-    // SELECT: 조건
-    int      has_where;
-    Where    where;
+    // SELECT: 조건 트리의 뿌리. WHERE 가 없으면 NULL
+    Cond    *where;
 } Statement;
 ```
+
+`WHERE id = 1 OR age >= 30 AND NOT name = 'Kim'`은 이런 트리가 된다:
+
+```
+            OR
+          /    \
+     id = 1     AND
+               /    \
+        age >= 30    NOT
+                      |
+                 name = 'Kim'
+```
+
+- `Statement`에서 조건 트리만 `malloc`으로 만든다. `parse`가 성공한 `Statement`는 다 쓴 뒤 반드시 `statement_free`를 부른다
+- `parse`가 실패하면 만들던 트리를 스스로 해제하고 `where`를 `NULL`로 둔다. 실패한 뒤에는 `statement_free`를 부르지 않아도 된다 (불러도 안전하다)
+- 조건 개수의 한도는 따로 없다. 문장 하나의 토큰 한도(63개)가 막는다
 
 ## 스키마와 DB
 
@@ -168,7 +205,8 @@ typedef struct {
 | 함수 | 하는 일 |
 |---|---|
 | `DbStatus tokenize_next(const char *sql, int *pos, Token *out, int max, int *count, DbError *err)` | `*pos`부터 문장 하나(`;`까지 또는 입력 끝까지)를 토큰으로 만들고 `*pos`를 그 뒤로 옮긴다. 마지막에 `TOK_EOF`를 붙인다. 토큰의 `pos`는 입력 전체 기준 위치다 |
-| `DbStatus parse(const Token *toks, int count, Statement *stmt, DbError *err)` | 문장 하나의 토큰을 `Statement`로 바꾼다. 끝은 `[;] EOF`여야 한다 |
+| `DbStatus parse(const Token *toks, int count, Statement *stmt, DbError *err)` | 문장 하나의 토큰을 `Statement`로 바꾼다. 끝은 `[;] EOF`여야 한다. WHERE가 있으면 조건 트리를 `malloc`으로 만든다 |
+| `void statement_free(Statement *stmt)` | `parse`가 만든 조건 트리를 해제하고 `stmt->where`를 `NULL`로 만든다. 두 번 불러도 안전하다 |
 | `DbStatus schema_load(const char *path, Schema *out, DbError *err)` | 스키마 파일 읽기. 첫 컬럼이 `id,INT`가 아니면 `DB_ERR_SCHEMA` |
 | `DbStatus db_open(const char *data_dir, Db *db, DbError *err)` | DB 준비 (테이블은 처음 쓸 때 연다) |
 | `DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)` | 이미 열었으면 그것을 돌려준다. 처음이면 스키마를 읽고, 데이터 파일을 훑어 `next_id`를 정하고, 파일을 `"ab"`로 열어 둔다 |
@@ -191,10 +229,10 @@ typedef void (*RowCallback)(const Value *fields, int field_count, void *ctx);
 2. INSERT: 값 개수가 `스키마 컬럼 수 − 1`인가 → 아니면 `DB_ERR_COLUMN_COUNT`. 값 개수가 스키마 컬럼 수와 같으면 메시지에 "id는 자동으로 붙는다"를 넣는다
 3. INSERT: 값의 종류가 컬럼 타입과 맞는가 (`COL_INT` ↔ `VAL_INT`, `COL_TEXT` ↔ `VAL_STR`) → 아니면 `DB_ERR_TYPE`
 4. INSERT: TEXT 값에 줄바꿈이 있으면 `DB_ERR_TYPE`
-5. SELECT: 고른 컬럼과 WHERE 컬럼이 스키마에 있는가 → 없으면 `DB_ERR_NO_COLUMN`
-6. SELECT: WHERE 값의 종류가 그 컬럼 타입과 맞는가 → 아니면 `DB_ERR_TYPE`
+5. SELECT: 고른 컬럼과 조건 트리의 모든 컬럼이 스키마에 있는가 → 없으면 `DB_ERR_NO_COLUMN`
+6. SELECT: 조건 트리의 모든 비교에서 값의 종류가 그 컬럼 타입과 맞는가 → 아니면 `DB_ERR_TYPE`
 
-비교는 INT는 숫자로, TEXT는 글자 그대로(대소문자 구분) 한다. 컬럼을 골라 SELECT하면 콜백에는 고른 컬럼만 고른 순서로 넘긴다.
+비교는 INT는 숫자로, TEXT는 글자 그대로(대소문자 구분) 한다. TEXT의 크기 비교(`<`, `>` 등)는 `strcmp`의 바이트 순서다. 행마다 조건 트리를 뿌리부터 재귀로 계산해서 참인 행만 고른다. 컬럼을 골라 SELECT하면 콜백에는 고른 컬럼만 고른 순서로 넘긴다.
 
 ## 오류 메시지 형식
 
@@ -272,7 +310,8 @@ OK (id=2)
 - 이 문서의 구조체와 함수 시그니처를 바꾸지 않는다. 바꿔야 한다고 판단하면 코드를 쓰기 전에 이유를 설명하고 확인을 받는다
 - 이 문서에 없는 내용을 추측해서 채우지 않는다. 모호하면 먼저 질문한다
 - 짧고 단순하게 쓴다. 함수 하나는 40줄 이내로, 한 가지 일만 한다
-- 범위 밖 기능을 만들지 않는다 (UPDATE, DELETE, JOIN, AND/OR, CREATE TABLE, 인덱스)
+- 범위 밖 기능을 만들지 않는다 (UPDATE, DELETE, JOIN, CREATE TABLE, 인덱스, 컬럼끼리 비교, `LIKE`·`IN`·`BETWEEN`·`IS NULL`)
+- `malloc`은 WHERE 조건 트리와 `main.c`의 SQL 파일 버퍼에만 쓴다. 나머지는 크기가 고정된 배열로 둔다
 - 버퍼에 복사하기 전에 반드시 길이를 검사하고, 넘으면 `DB_ERR_TOO_LONG`을 돌려준다
 - 전역 변수와 static 지역 상태를 쓰지 않는다. 상태는 `Db` 구조체에만 둔다
 - 어떤 입력에도 프로그램이 죽으면 안 된다. 모든 실패는 `DbStatus`와 `DbError`로 돌려준다
@@ -314,5 +353,11 @@ OK (id=2)
 | `WHERE name = 'Kim'` | 선형 탐색으로 찾음 |
 | `WHERE id = 'abc'` | `DB_ERR_TYPE` |
 | `WHERE nope = 1` | `DB_ERR_NO_COLUMN` |
+| `WHERE id = 1 OR age = 31 AND name = 'Choi'` | `AND`가 먼저 묶임: `id = 1 OR (age = 31 AND name = 'Choi')` |
+| `WHERE (id = 1 OR age = 31) AND name = 'Choi'` | 괄호가 순서를 바꿈 |
+| `WHERE NOT (name = 'Kim' OR name = 'Lee')` | 둘 다 아닌 행 |
+| `WHERE age >= 20 AND age <= 31`, `WHERE age != 31`, `WHERE age <> 31` | 비교 연산자 6개가 모두 동작 |
+| `WHERE (a = 1`, `WHERE a = 1 AND`, `WHERE a 1` | 파서 오류. 만들던 트리가 남지 않음 (`make asan`에 누수 없음) |
+| `WHERE id = 1 AND (age = 2 OR nope = 3)` | `DB_ERR_NO_COLUMN` (트리 안쪽이어도 잡음) |
 | 한글 값 `'김건호'` | 저장되고 그대로 돌아옴 |
 | 프로그램을 두 번 실행 | id가 이어서 붙음 |
