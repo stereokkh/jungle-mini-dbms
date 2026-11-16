@@ -1,5 +1,6 @@
 #include "db.h"
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -71,6 +72,10 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
     st = storage_scan(db, t, keep_max_id, &max_id, err);
     if (st != DB_OK) {
         return st;
+    }
+    // 가장 큰 id 가 long long 의 끝이면 +1 이 넘친다 (정의되지 않은 동작). 더하기 전에 막는다.
+    if (max_id == LLONG_MAX) {
+        return fail(err, DB_ERR_IO, "table '%s' has no ids left", name);
     }
     t->next_id = max_id + 1;
 

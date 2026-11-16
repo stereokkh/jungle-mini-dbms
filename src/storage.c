@@ -138,13 +138,18 @@ static DbStatus scan_lines(FILE *in, const Table *t, ScanCallback cb, void *ctx,
 
     while (fgets(line, sizeof line, in) != NULL) {
         size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n') {
-            line[len - 1] = '\0';
-        } else if (len == MAX_LINE_LEN) {
+        if (len == MAX_LINE_LEN && line[len - 1] != '\n') {
             // 버퍼가 꽉 찼는데 줄바꿈이 없으면 줄이 한도를 넘은 것이다.
             return fail(err, DB_ERR_TOO_LONG, "table '%s': row at offset %ld is too long",
                         t->name, offset);
         }
+        if (len == 0 || line[len - 1] != '\n') {
+            // 줄바꿈 없이 끝난 줄은 쓰다가 끊긴 것이다. 그대로 받아 주면 다음 INSERT 가
+            // 이 줄 뒤에 바로 붙어서 두 행이 한 줄로 합쳐진다.
+            return fail(err, DB_ERR_IO, "table '%s': incomplete row at offset %ld",
+                        t->name, offset);
+        }
+        line[len - 1] = '\0';
         int n = split_line(line, fields, max_fields);
         if (n < 0 || !matches_schema(&t->schema, fields, n)) {
             return fail(err, DB_ERR_IO, "table '%s': corrupt row at offset %ld", t->name, offset);

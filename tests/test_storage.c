@@ -176,11 +176,11 @@ static void test_scan_values(void)
 
     make_dir(dir, sizeof dir);
     write_file(dir, "users.schema", USERS_SCHEMA);
-    // id 가 순서대로가 아니어도 next_id 는 가장 큰 id + 1 이다. 마지막 줄은 줄바꿈이 없다.
+    // id 가 순서대로가 아니어도 next_id 는 가장 큰 id + 1 이다.
     write_file(dir, "users.csv",
                "7,\"He said \"\"hi\"\"\",-5\n"
                "2,\"\",0\n"
-               "3,\"김건호\",30");
+               "3,\"김건호\",30\n");
 
     assert(db_open(dir, &db, &err) == DB_OK);
     assert(db_get_table(&db, "users", &t, &err) == DB_OK);
@@ -244,6 +244,14 @@ static void test_corrupt_data(void)
     assert(open_with_data("1,\"Kim\",20\n\n", &err) == DB_ERR_IO);     // 빈 줄
     assert(open_with_data("1,\"Kim\",99999999999999999999\n", &err) == DB_ERR_IO);
     assert(strstr(err.message, "users") != NULL);
+
+    // 줄바꿈 없이 끝난 마지막 줄은 쓰다가 끊긴 것으로 본다
+    assert(open_with_data("1,\"Kim\",20\n2,\"Lee\",31", &err) == DB_ERR_IO);
+    assert(strstr(err.message, "incomplete row at offset 11") != NULL);
+
+    // id 가 long long 의 끝이면 다음 id 를 만들 수 없다 (+1 이 넘친다)
+    assert(open_with_data("9223372036854775807,\"Kim\",20\n", &err) == DB_ERR_IO);
+    assert(open_with_data("9223372036854775806,\"Kim\",20\n", &err) == DB_OK);
 
     // 한도(8192바이트)를 넘는 줄
     strcpy(big, "1,\"");
