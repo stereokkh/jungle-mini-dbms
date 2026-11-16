@@ -1,8 +1,12 @@
-FROM debian:bookworm-slim
+# Debian 12 에 gcc 13 을 얹은 공식 이미지. gcc 는 /usr/local/bin/gcc 에 있다.
+# Debian 12 의 기본 gcc 12 는 AddressSanitizer 가 WSL2 같은 최신 커널에서 시작하다가
+# 가끔 세그폴트로 죽어서(make asan 이 코드와 상관없이 실패) gcc 13 을 쓴다.
+# 그래서 apt 로 gcc 를 따로 설치하지 않는다. 설치하면 gcc 12 가 하나 더 생긴다.
+FROM gcc:13-bookworm
 
 # sqlite3: 동작 비교용 실제 DBMS
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev make gdb sqlite3 \
+    && apt-get install -y --no-install-recommends make gdb sqlite3 \
        curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 

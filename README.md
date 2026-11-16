@@ -1,6 +1,6 @@
 # Jungle Mini DBMS
 
-C로 작게 구현하는 DBMS입니다. 팀원은 Docker로 Debian 12, GCC, Make, GDB, SQLite가 포함된 C 개발 환경을 실행할 수 있습니다.
+C로 작게 구현하는 DBMS입니다. 팀원은 Docker로 Debian 12, GCC 13, Make, GDB, SQLite가 포함된 C 개발 환경을 실행할 수 있습니다.
 
 ## 1. Docker 준비
 

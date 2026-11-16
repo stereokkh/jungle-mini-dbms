@@ -266,7 +266,7 @@ OK (id=2)
 
 ## 구현 규칙
 
-- 환경: Docker 컨테이너(Debian 12, gcc 12). 호스트(Windows)에는 gcc가 없으므로 모든 빌드와 테스트는 `docker compose run --rm dev make test`처럼 컨테이너에서 실행한다
+- 환경: Docker 컨테이너(Debian 12, gcc 13). 호스트(Windows)에는 gcc가 없으므로 모든 빌드와 테스트는 `docker compose run --rm dev make test`처럼 컨테이너에서 실행한다
 - C11, 외부 라이브러리 없이 libc와 POSIX만 쓴다. 기존 Makefile의 옵션(`-std=c11 -D_GNU_SOURCE -Wall -Wextra`)에서 경고가 하나도 없어야 한다
 - 모듈을 끝낼 때마다 `make test`와 `make asan`을 모두 통과시킨다
 - 이 문서의 구조체와 함수 시그니처를 바꾸지 않는다. 바꿔야 한다고 판단하면 코드를 쓰기 전에 이유를 설명하고 확인을 받는다
