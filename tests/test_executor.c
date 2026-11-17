@@ -369,8 +369,62 @@ static void test_where_tree(void)
     remove_db(dir, &db);
 }
 
+// `WHERE id = N` 은 인덱스로 찾는다. 리프가 나뉠 만큼(128개 초과) 넣고 확인한다.
+// 결과는 선형 탐색과 같아야 하므로, 같은 행을 선형 탐색 조건(id >= N AND id <= N)으로도 찾아 비교한다.
+static void test_id_index(void)
+{
+    char dir[64], sql[128], a[64], b[64];
+    Db db;
+    Rows rows;
+    ExecResult res;
+    DbError err;
+    Table *t;
+
+    make_db(dir, sizeof dir, &db);
+    for (int i = 1; i <= 300; i++) {
+        snprintf(sql, sizeof sql, "INSERT INTO users VALUES ('user%d', %d)", i, i % 50);
+        insert_ok(&db, sql, i);
+    }
+    assert(db_get_table(&db, "users", &t, &err) == DB_OK);
+    assert(t->index->count == 300 && t->index->height == 2);
+
+    // 처음, 가운데, 끝
+    assert(run(&db, "SELECT * FROM users WHERE id = 1", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][1].s, "user1") == 0);
+    assert(run(&db, "SELECT name, age FROM users WHERE id = 177", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && rows.field_counts[0] == 2);
+    assert(strcmp(rows.rows[0][0].s, "user177") == 0 && rows.rows[0][1].i == 27);
+    assert(run(&db, "SELECT * FROM users WHERE id = 300", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][1].s, "user300") == 0);
+
+    // 없는 id 는 0행
+    assert(run(&db, "SELECT * FROM users WHERE id = 301", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 0);
+    assert(run(&db, "SELECT * FROM users WHERE id = -1", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 0);
+
+    // 인덱스 탐색과 선형 탐색의 결과가 같다
+    assert(strcmp(ids_where(&db, "id = 250", a, sizeof a),
+                  ids_where(&db, "id >= 250 AND id <= 250", b, sizeof b)) == 0);
+    assert(strcmp(a, "250") == 0);
+
+    // 다시 열면 파일을 훑어 인덱스를 다시 만든다
+    db_close(&db);
+    assert(db_open(dir, &db, &err) == DB_OK);
+    assert(run(&db, "SELECT * FROM users WHERE id = 299", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][1].s, "user299") == 0);
+    assert(db_get_table(&db, "users", &t, &err) == DB_OK);
+    assert(t->index->count == 300);
+    insert_ok(&db, "INSERT INTO users VALUES ('late', 1)", 301);
+    assert(run(&db, "SELECT * FROM users WHERE id = 301", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][1].s, "late") == 0);
+
+    remove_db(dir, &db);
+}
+
 int main(void)
 {
+    test_id_index();
     test_insert_and_select_all();
     test_where_and_columns();
     test_text_round_trip();
