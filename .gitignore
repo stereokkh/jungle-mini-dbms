@@ -11,3 +11,6 @@ CLAUDE.md
 CLAUDE.local.md
 .mcp.json
 .ai/
+
+# 실행하면 생기는 데이터 파일 (스키마 파일은 커밋한다)
+data/*.csv
