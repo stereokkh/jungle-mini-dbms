@@ -17,30 +17,41 @@ DbStatus db_open(const char *data_dir, Db *db, DbError *err)
     return DB_OK;
 }
 
-// storage_scan 콜백: 지금까지 본 id 중 가장 큰 것을 ctx 에 남긴다.
-// 저장소가 스키마와 맞는 줄만 넘겨주므로 첫 필드는 항상 INT 다.
-static int keep_max_id(const Value *fields, int field_count, long offset, void *ctx)
+void db_index_row(Table *t, long long id, long offset)
 {
-    long long *max_id = ctx;
-
-    (void)field_count;
-    (void)offset;
-    if (fields[0].i > *max_id) {
-        *max_id = fields[0].i;
+    if (t->id_index_usable && bpt_insert(&t->id_index, id, offset) != BPT_OK) {
+        // 할당 실패나 기존 CSV의 중복 ID가 있으면 전체 스캔으로 모든 행을 조회한다.
+        bpt_free(t->id_index);
+        t->id_index = NULL;
+        t->id_index_usable = false;
     }
+}
+
+// 저장소가 스키마를 확인하므로 첫 필드는 항상 INT다. next_id에는 잠시 최대 ID를 담는다.
+// CSV에서 읽은 기존 행을 B+트리에 등록하는 콜백
+static int index_existing_row(const Value *fields, int field_count, long offset, void *ctx)
+{
+    Table *t = ctx;
+    (void)field_count;
+    long long id = fields[0].i;
+    if (id > t->next_id) {
+        t->next_id = id;
+    }
+    db_index_row(t, id, offset);
     return 0;
 }
 
-// 빈 칸 t 에 테이블을 연다: 스키마 읽기 → next_id 정하기 → 데이터 파일을 "ab" 로 열기.
-// 파일을 맨 마지막에 열어서, 중간에 실패해도 닫을 것이 없다.
+// 스키마를 읽고, CSV를 한 번 훑어 최대 ID와 인덱스를 구한 뒤 쓰기용 파일을 연다.
 static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
 {
     char path[512];     // data_dir(255) + '/' + name(63) + ".schema" 가 항상 들어가는 크기
-    long long max_id = 0;
     DbStatus st;
 
     strcpy(t->name, name);  // 길이는 db_get_table 이 이미 검사했다
     t->fp = NULL;
+    t->next_id = 0;
+    t->id_index = NULL;
+    t->id_index_usable = true;
 
     snprintf(path, sizeof path, "%s/%s.schema", db->data_dir, name);
     st = schema_load(path, &t->schema, err);
@@ -52,22 +63,29 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
         return st;
     }
 
-    st = storage_scan(db, t, keep_max_id, &max_id, err);
+    st = storage_scan(db, t, index_existing_row, t, err);
     if (st != DB_OK) {
-        return st;
+        goto fail;
     }
     // 가장 큰 id 가 long long 의 끝이면 +1 이 넘친다 (정의되지 않은 동작). 더하기 전에 막는다.
-    if (max_id == LLONG_MAX) {
-        return error_set(err, DB_ERR_IO, -1, "table '%s' has no ids left", name);
+    if (t->next_id == LLONG_MAX) {
+        st = error_set(err, DB_ERR_IO, -1, "table '%s' has no ids left", name);
+        goto fail;
     }
-    t->next_id = max_id + 1;
+    t->next_id++;
 
     snprintf(path, sizeof path, "%s/%s.csv", db->data_dir, name);
     t->fp = fopen(path, "ab");
     if (t->fp == NULL) {
-        return error_set(err, DB_ERR_IO, -1, "cannot open data file '%s'", path);
+        st = error_set(err, DB_ERR_IO, -1, "cannot open data file '%s'", path);
+        goto fail;
     }
     return DB_OK;
+
+fail:
+    bpt_free(t->id_index);
+    t->id_index = NULL;
+    return st;
 }
 
 DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)
@@ -104,6 +122,8 @@ void db_close(Db *db)
     for (int i = 0; i < db->table_count; i++) {
         fclose(db->tables[i].fp);
         db->tables[i].fp = NULL;
+        bpt_free(db->tables[i].id_index);
+        db->tables[i].id_index = NULL;
     }
     db->table_count = 0;
 }

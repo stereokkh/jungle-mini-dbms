@@ -38,8 +38,11 @@ make            # build/mini-dbms
 ./build/mini-dbms queries.sql   # data/ 의 테이블에 SQL 파일을 실행
 make test       # tests/test_*.c 를 각각 빌드해서 실행
 make asan       # AddressSanitizer/UBSan 으로 테스트
+make bench      # 100만 행을 넣고 ID 인덱스 조회와 이름 전체 스캔을 비교
 make clean
 ```
+
+`make bench`는 임시 테이블에 100만 행을 INSERT한 뒤 다시 엽니다. INSERT 시간과 테이블 열기·인덱스 재구축 시간을 따로 표시하고, 같은 ID를 반환하는 `WHERE id = 750000`과 `WHERE name = 'user_750000'`을 번갈아 실행해 각각 21회 중앙값을 비교합니다.
 
 `src/*.c`와 `tests/test_*.c`는 Makefile을 고치지 않아도 자동으로 포함됩니다. 동작을 비교할 때는 컨테이너 안의 `sqlite3`를 사용합니다.
 

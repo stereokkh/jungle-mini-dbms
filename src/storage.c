@@ -111,13 +111,13 @@ static int matches_schema(const Schema *s, const Value *fields, int n)
     return 1;
 }
 
-// 열린 파일을 처음부터 한 줄씩 읽어 콜백을 부른다. 파일을 닫는 일은 부른 쪽이 한다.
-static DbStatus scan_lines(FILE *in, const Table *t, ScanCallback cb, void *ctx, DbError *err)
+// 파일의 현재 위치에서 읽는다. 단건 조회에서도 같은 CSV 검증을 거친다.
+static DbStatus read_lines(FILE *in, const Table *t, long offset, bool single,
+                           ScanCallback cb, void *ctx, DbError *err)
 {
     char line[MAX_LINE_LEN + 1];
     Value fields[16];
     int max_fields = (int)(sizeof fields / sizeof fields[0]);
-    long offset = 0;
 
     while (fgets(line, sizeof line, in) != NULL) {
         size_t len = strlen(line);
@@ -137,18 +137,23 @@ static DbStatus scan_lines(FILE *in, const Table *t, ScanCallback cb, void *ctx,
         if (n < 0 || !matches_schema(&t->schema, fields, n)) {
             return error_set(err, DB_ERR_IO, -1, "table '%s': corrupt row at offset %ld", t->name, offset);
         }
-        if (cb(fields, n, offset, ctx) != 0) {
-            return DB_OK;   // 콜백이 그만 읽으라고 했다
+        if (cb(fields, n, offset, ctx) != 0 || single) {
+            return DB_OK;
         }
         offset += (long)len;
     }
     if (ferror(in)) {
         return error_set(err, DB_ERR_IO, -1, "cannot read table '%s'", t->name);
     }
+    if (single) {
+        return error_set(err, DB_ERR_IO, -1, "table '%s': no row at offset %ld", t->name, offset);
+    }
     return DB_OK;
 }
 
-DbStatus storage_scan(Db *db, Table *t, ScanCallback cb, void *ctx, DbError *err)
+// 테이블의 CSV 파일을 열고, 어디서부터 몇 행을 읽을지 정한 뒤 read_lines()에 넘김
+static DbStatus read_table(Db *db, Table *t, long offset, bool single,
+                           ScanCallback cb, void *ctx, DbError *err)
 {
     char path[512];     // data_dir(255) + '/' + name(63) + ".csv" 가 항상 들어가는 크기
 
@@ -161,12 +166,27 @@ DbStatus storage_scan(Db *db, Table *t, ScanCallback cb, void *ctx, DbError *err
 
     FILE *in = fopen(path, "rb");
     if (in == NULL) {
-        if (errno == ENOENT) {
+        if (errno == ENOENT && !single) {
             return DB_OK;   // 데이터 파일이 아직 없으면 행이 0개인 것이다
         }
         return error_set(err, DB_ERR_IO, -1, "cannot open data file '%s'", path);
     }
-    DbStatus st = scan_lines(in, t, cb, ctx, err);
+    DbStatus st;
+    if (single && fseek(in, offset, SEEK_SET) != 0) {
+        st = error_set(err, DB_ERR_IO, -1, "table '%s': cannot seek to offset %ld", t->name, offset);
+    } else {
+        st = read_lines(in, t, offset, single, cb, ctx, err);
+    }
     fclose(in);
     return st;
+}
+
+DbStatus storage_scan(Db *db, Table *t, ScanCallback cb, void *ctx, DbError *err)
+{
+    return read_table(db, t, 0, false, cb, ctx, err);
+}
+
+DbStatus storage_read_at(Db *db, Table *t, long offset, ScanCallback cb, void *ctx, DbError *err)
+{
+    return read_table(db, t, offset, true, cb, ctx, err);
 }

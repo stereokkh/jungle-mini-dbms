@@ -2,6 +2,7 @@
 #
 #   make             build/mini-dbms
 #   make test        tests/test_*.c 를 각각 빌드해서 실행
+#   make bench       100만 행의 ID 인덱스 조회와 전체 스캔 비교
 #   make asan        AddressSanitizer/UBSan 빌드로 make test 실행
 #   make clean
 #
@@ -22,10 +23,11 @@ LIB_SRCS    := $(filter-out src/main.c,$(SRCS))
 TEST_SRCS   := $(wildcard tests/test_*.c)
 TESTS       := $(patsubst tests/%.c,$(BUILD)/%,$(TEST_SRCS))
 BIN         := $(BUILD)/mini-dbms
+BENCH       := $(BUILD)/bench_index
 
 SAN_FLAGS   := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test asan clean
+.PHONY: all test bench asan clean
 
 all: $(BIN)
 
@@ -39,9 +41,15 @@ $(BIN): $(SRCS) $(HDRS) | $(BUILD)
 $(BUILD)/test_%: tests/test_%.c $(LIB_SRCS) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB_SRCS) $(LDFLAGS)
 
+$(BENCH): bench/bench_index.c $(LIB_SRCS) $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_SRCS) $(LDFLAGS)
+
 test: $(TESTS)
 	@set -e; for t in $(TESTS); do echo "== $$t"; $$t; done
 	@echo "== all tests passed"
+
+bench: $(BENCH)
+	./$(BENCH)
 
 asan:
 	$(MAKE) BUILD=build/asan CFLAGS="$(CFLAGS_BASE) -O1 $(SAN_FLAGS)" LDFLAGS="$(SAN_FLAGS)" test

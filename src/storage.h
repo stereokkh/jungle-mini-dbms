@@ -20,4 +20,7 @@ DbStatus storage_append(Table *t, const char *line, long *offset, DbError *err);
 // 쓰기용 fp 는 버퍼에 아직 안 내려간 줄이 있을 수 있어서, 읽기 전에 비워야 방금 넣은 줄이 보인다.
 DbStatus storage_scan(Db *db, Table *t, ScanCallback cb, void *ctx, DbError *err);
 
+// CSV의 지정한 바이트 위치에서 행 하나를 읽어 같은 방식으로 콜백에 넘긴다.
+DbStatus storage_read_at(Db *db, Table *t, long offset, ScanCallback cb, void *ctx, DbError *err);
+
 #endif

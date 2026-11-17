@@ -245,12 +245,44 @@ static void test_reopen_continues_id(void)
     make_db(dir, sizeof dir, &db);
     insert_ok(&db, "INSERT INTO users VALUES ('Kim', 20)", 1);
     insert_ok(&db, "INSERT INTO users VALUES ('Lee', 31)", 2);
+    assert(run(&db, "SELECT * FROM users WHERE id = 1", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][1].s, "Kim") == 0);
     db_close(&db);
 
     assert(db_open(dir, &db, &err) == DB_OK);
+    assert(run(&db, "SELECT * FROM users WHERE id = 2", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][1].s, "Lee") == 0);
+    assert(run(&db, "SELECT * FROM users WHERE id = 3", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 0 && rows.count == 0);
     insert_ok(&db, "INSERT INTO users VALUES ('Park', 40)", 3);
     assert(run(&db, "SELECT * FROM users", &rows, &res, &err) == DB_OK);
     assert(res.row_count == 3 && rows.rows[2][0].i == 3);
+
+    remove_db(dir, &db);
+}
+
+static void test_legacy_duplicate_ids(void)
+{
+    char dir[64], path[300];
+    Db db;
+    Rows rows;
+    ExecResult res;
+    DbError err;
+
+    make_db(dir, sizeof dir, &db);
+    snprintf(path, sizeof path, "%s/users.csv", dir);
+    FILE *fp = fopen(path, "wb");
+    assert(fp != NULL);
+    fputs("5,\"Kim\",20\n5,\"Lee\",31\n2,\"Park\",40\n", fp);
+    fclose(fp);
+
+    assert(run(&db, "SELECT name FROM users WHERE id = 5", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 2 && rows.count == 2);
+    assert(strcmp(rows.rows[0][0].s, "Kim") == 0);
+    assert(strcmp(rows.rows[1][0].s, "Lee") == 0);
+    insert_ok(&db, "INSERT INTO users VALUES ('Choi', 30)", 6);
+    assert(run(&db, "SELECT name FROM users WHERE id = 6", &rows, &res, &err) == DB_OK);
+    assert(res.row_count == 1 && strcmp(rows.rows[0][0].s, "Choi") == 0);
 
     remove_db(dir, &db);
 }
@@ -378,6 +410,7 @@ int main(void)
     test_select_errors();
     test_where_tree();
     test_reopen_continues_id();
+    test_legacy_duplicate_ids();
     test_widest_row();
     printf("test_executor: ok\n");
     return 0;

@@ -146,6 +146,7 @@ static DbStatus run_insert(Table *t, const Statement *stmt, ExecResult *result, 
     if ((st = format_row(t->next_id, stmt, line, err)) != DB_OK) return st;
     if ((st = storage_append(t, line, &offset, err)) != DB_OK) return st;
 
+    db_index_row(t, t->next_id, offset);
     // 저장에 성공한 뒤에만 id 를 넘긴다. 실패한 INSERT 가 id 를 먹지 않게 하려는 것이다.
     result->inserted_id = t->next_id;
     t->next_id++;
@@ -299,7 +300,16 @@ static DbStatus run_select(Db *db, Table *t, const Statement *stmt, RowCallback 
     }
     plan.on_row = on_row;
     plan.ctx = ctx;
-    st = storage_scan(db, t, select_row, &plan, err);
+    const Cond *where = plan.where;
+    if (t->id_index_usable && where != NULL && where->type == COND_COMPARE &&
+        where->op == OP_EQ && strcmp(where->column, "id") == 0) {
+        long offset;
+        if (bpt_find(t->id_index, where->value.i, &offset)) {
+            st = storage_read_at(db, t, offset, select_row, &plan, err);
+        }
+    } else {
+        st = storage_scan(db, t, select_row, &plan, err);
+    }
     result->row_count = plan.row_count;
     return st;
 }
