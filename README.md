@@ -38,10 +38,13 @@ make            # build/mini-dbms
 ./build/mini-dbms queries.sql   # data/ 의 테이블에 SQL 파일을 실행
 make test       # tests/test_*.c 를 각각 빌드해서 실행
 make asan       # AddressSanitizer/UBSan 으로 테스트
+sh bench/run.sh # 100만 건에서 id 인덱스 조회와 선형 탐색 비교
 make clean
 ```
 
 `src/*.c`와 `tests/test_*.c`는 Makefile을 고치지 않아도 자동으로 포함됩니다. 동작을 비교할 때는 컨테이너 안의 `sqlite3`를 사용합니다.
+
+`WHERE id = 정수`는 메모리의 B+ 트리 인덱스로 찾습니다. 구조와 실패 처리, 성능 측정 결과는 [Phase 2 문서](docs/phase2-bplus-tree.md)에 있습니다. 인덱스가 파일과 어긋나지 않도록, 실행 중에는 `data/`의 CSV 파일을 직접 고치지 않습니다.
 
 ## 5. 브랜치 전략
 

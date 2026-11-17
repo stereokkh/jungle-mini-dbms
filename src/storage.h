@@ -20,4 +20,9 @@ DbStatus storage_append(Table *t, const char *line, long *offset, DbError *err);
 // 쓰기용 fp 는 버퍼에 아직 안 내려간 줄이 있을 수 있어서, 읽기 전에 비워야 방금 넣은 줄이 보인다.
 DbStatus storage_scan(Db *db, Table *t, ScanCallback cb, void *ctx, DbError *err);
 
+// offset 에서 시작하는 줄 하나만 읽어 콜백을 한 번 부른다 (인덱스로 찾은 행을 읽을 때 쓴다).
+// storage_scan 처럼 먼저 fflush 하고 읽기용으로 따로 연다. 파일 앞부분은 읽지 않고 fseek 으로 건너뛴다.
+// offset 에 온전한 줄이 없으면 DB_ERR_IO.
+DbStatus storage_read_at(Db *db, Table *t, long offset, ScanCallback cb, void *ctx, DbError *err);
+
 #endif
