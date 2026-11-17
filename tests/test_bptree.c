@@ -33,7 +33,7 @@ static void test_no_split(void)
     BPTree *t = bptree_create();
 
     for (long long k = 1; k <= BPTREE_MAX_KEYS; k++) {
-        assert(bptree_insert(t, k, k * 10) == 0);
+        assert(bptree_insert(t, k, k * 10) == BPTREE_OK);
     }
     assert(t->count == BPTREE_MAX_KEYS);
     assert(t->height == 1);
@@ -49,7 +49,7 @@ static void test_first_split(void)
     long off;
 
     for (long long k = 1; k <= n; k++) {
-        assert(bptree_insert(t, k, k * 10) == 0);
+        assert(bptree_insert(t, k, k * 10) == BPTREE_OK);
     }
     assert(t->count == n);
     assert(t->height == 2);
@@ -67,7 +67,7 @@ static void test_ascending(void)
     long off;
 
     for (long long k = 1; k <= n; k++) {
-        assert(bptree_insert(t, k, k * 10) == 0);
+        assert(bptree_insert(t, k, k * 10) == BPTREE_OK);
     }
     assert(t->count == n);
     assert(t->height == 3);
@@ -82,7 +82,7 @@ static void test_descending(void)
     long long n = 50000;
 
     for (long long k = n; k >= 1; k--) {
-        assert(bptree_insert(t, k, k * 10) == 0);
+        assert(bptree_insert(t, k, k * 10) == BPTREE_OK);
     }
     assert(t->count == n);
     check_all(t, n);
@@ -107,7 +107,7 @@ static void test_shuffled(void)
         keys[j] = tmp;
     }
     for (int i = 0; i < N; i++) {
-        assert(bptree_insert(t, keys[i], keys[i] * 10) == 0);
+        assert(bptree_insert(t, keys[i], keys[i] * 10) == BPTREE_OK);
     }
     assert(t->count == N);
     check_all(t, N);
@@ -121,7 +121,7 @@ static void test_missing_and_negative(void)
     long off;
 
     for (long long k = -1000; k <= 1000; k += 2) {
-        assert(bptree_insert(t, k, 7) == 0);
+        assert(bptree_insert(t, k, 7) == BPTREE_OK);
     }
     for (long long k = -1000; k <= 1000; k++) {
         assert(bptree_search(t, k, &off) == (k % 2 == 0));
@@ -129,19 +129,43 @@ static void test_missing_and_negative(void)
     bptree_destroy(t);
 }
 
-// 같은 키를 다시 넣으면 개수는 그대로고 값만 바뀐다.
-static void test_duplicate_overwrites(void)
+// 같은 키를 다시 넣으면 BPTREE_DUPLICATE 이고, 개수와 값은 그대로다.
+static void test_duplicate_rejected(void)
 {
     BPTree *t = bptree_create();
     long off = 0;
 
     for (long long k = 1; k <= 1000; k++) {
-        assert(bptree_insert(t, k, k * 10) == 0);
+        assert(bptree_insert(t, k, k * 10) == BPTREE_OK);
     }
-    assert(bptree_insert(t, 500, 9999) == 0);
+    assert(bptree_insert(t, 500, 9999) == BPTREE_DUPLICATE);
+    assert(bptree_insert(t, 1, 9999) == BPTREE_DUPLICATE);
+    assert(bptree_insert(t, 1000, 9999) == BPTREE_DUPLICATE);
     assert(t->count == 1000);
     assert(bptree_search(t, 500, &off) == 1);
-    assert(off == 9999);
+    assert(off == 5000);
+    check_all(t, 1000);
+    bptree_destroy(t);
+}
+
+// 꽉 찬 노드를 지나는 중복 삽입: 나뉠 때 쓰려고 미리 만든 노드(새 루트 포함)를 쓰지 않고 해제해야 한다.
+// 해제하지 않으면 make asan 의 LeakSanitizer 가 잡는다.
+static void test_duplicate_on_full_nodes(void)
+{
+    BPTree *t = bptree_create();
+
+    // 루트가 꽉 찬 리프 하나: 리프용 노드와 새 루트를 미리 만들었다가 버린다
+    for (long long k = 1; k <= BPTREE_MAX_KEYS; k++) {
+        assert(bptree_insert(t, k, k * 10) == BPTREE_OK);
+    }
+    assert(bptree_insert(t, 1, 0) == BPTREE_DUPLICATE);
+    assert(t->count == BPTREE_MAX_KEYS && t->height == 1);
+    check_all(t, BPTREE_MAX_KEYS);
+
+    // 다시 넣으면 정상적으로 나뉜다
+    assert(bptree_insert(t, BPTREE_MAX_KEYS + 1, (BPTREE_MAX_KEYS + 1) * 10) == BPTREE_OK);
+    assert(t->height == 2);
+    check_all(t, BPTREE_MAX_KEYS + 1);
     bptree_destroy(t);
 }
 
@@ -154,7 +178,8 @@ int main(void)
     test_descending();
     test_shuffled();
     test_missing_and_negative();
-    test_duplicate_overwrites();
+    test_duplicate_rejected();
+    test_duplicate_on_full_nodes();
     bptree_destroy(NULL);
     printf("test_bptree: all passed\n");
     return 0;

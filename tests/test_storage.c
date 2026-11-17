@@ -232,6 +232,7 @@ static void test_read_at(void)
     assert(db_get_table(&db, "users", &t, &err) == DB_OK);
 
     // 테이블을 열면서 줄마다 (id, offset) 이 인덱스에 들어갔다
+    assert(t->index_usable == 1);
     assert(t->index->count == 3);
     assert(bptree_search(t->index, 3, &offset) == 1 && offset == 29);
     assert(bptree_search(t->index, 7, &offset) == 1 && offset == 0);
@@ -296,6 +297,12 @@ static void test_corrupt_data(void)
     // id 가 long long 의 끝이면 다음 id 를 만들 수 없다 (+1 이 넘친다)
     assert(open_with_data("9223372036854775807,\"Kim\",20\n", &err) == DB_ERR_IO);
     assert(open_with_data("9223372036854775806,\"Kim\",20\n", &err) == DB_OK);
+
+    // 같은 id 가 두 줄이면 사람이 파일을 고친 것이다. 깨진 파일로 보고 열지 않는다
+    assert(open_with_data("1,\"Kim\",20\n1,\"Lee\",31\n", &err) == DB_ERR_IO);
+    assert(strstr(err.message, "duplicate id 1 at offset 11") != NULL);
+    assert(open_with_data("5,\"Kim\",20\n2,\"Lee\",31\n5,\"Park\",40\n", &err) == DB_ERR_IO);
+    assert(strstr(err.message, "duplicate id 5 at offset 22") != NULL);
 
     // 한도(8192바이트)를 넘는 줄
     strcpy(big, "1,\"");

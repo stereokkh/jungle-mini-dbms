@@ -17,11 +17,21 @@ DbStatus db_open(const char *data_dir, Db *db, DbError *err)
     return DB_OK;
 }
 
+// 인덱스를 버리고 이 테이블을 선형 탐색으로만 조회하게 한다.
+void db_drop_index(Table *t)
+{
+    bptree_destroy(t->index);
+    t->index = NULL;
+    t->index_usable = 0;
+}
+
 // 테이블을 열면서 파일을 한 번 훑는 동안 모으는 것
 typedef struct {
+    Table    *t;              // 인덱스를 채울 테이블
     long long max_id;         // 지금까지 본 id 중 가장 큰 것
-    BPTree   *index;          // (id, offset) 을 넣을 트리
-    int       out_of_memory;  // 트리에 넣다가 메모리가 모자랐으면 1
+    int       duplicate;      // 같은 id 가 두 줄 있었으면 1. 아래 두 칸이 그 두 번째 줄이다
+    long long dup_id;
+    long      dup_offset;
 } LoadState;
 
 // storage_scan 콜백: 줄마다 가장 큰 id 를 기억하고, (id, 그 줄의 offset) 을 인덱스에 넣는다.
@@ -35,9 +45,21 @@ static int load_row(const Value *fields, int field_count, long offset, void *ctx
     if (id > load->max_id) {
         load->max_id = id;
     }
-    if (bptree_insert(load->index, id, offset) != 0) {
-        load->out_of_memory = 1;
+    if (!load->t->index_usable) {
+        return 0;   // 인덱스를 버린 뒤에는 max_id 만 모은다
+    }
+
+    BPTreeStatus st = bptree_insert(load->t->index, id, offset);
+    if (st == BPTREE_DUPLICATE) {
+        // 시스템은 같은 id 를 두 번 주지 않는다. 사람이 파일을 고친 것이니 깨진 파일로 본다.
+        load->duplicate  = 1;
+        load->dup_id     = id;
+        load->dup_offset = offset;
         return 1;   // 그만 읽는다
+    }
+    if (st == BPTREE_NO_MEMORY) {
+        // 결과가 틀리지 않게 인덱스를 버리고 선형 탐색으로 간다. 테이블은 계속 연다.
+        db_drop_index(load->t);
     }
     return 0;
 }
@@ -47,14 +69,15 @@ static int load_row(const Value *fields, int field_count, long offset, void *ctx
 static DbStatus load_table(Db *db, Table *t, DbError *err)
 {
     char path[512];     // data_dir(255) + '/' + name(63) + ".csv" 가 항상 들어가는 크기
-    LoadState load = { 0, t->index, 0 };
+    LoadState load = { t, 0, 0, 0, 0 };
 
     DbStatus st = storage_scan(db, t, load_row, &load, err);
     if (st != DB_OK) {
         return st;
     }
-    if (load.out_of_memory) {
-        return error_set(err, DB_ERR_IO, -1, "out of memory while indexing table '%s'", t->name);
+    if (load.duplicate) {
+        return error_set(err, DB_ERR_IO, -1, "table '%s': duplicate id %lld at offset %ld",
+                         t->name, load.dup_id, load.dup_offset);
     }
     // 가장 큰 id 가 long long 의 끝이면 +1 이 넘친다 (정의되지 않은 동작). 더하기 전에 막는다.
     if (load.max_id == LLONG_MAX) {
@@ -80,6 +103,7 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
     strcpy(t->name, name);  // 길이는 db_get_table 이 이미 검사했다
     t->fp = NULL;
     t->index = NULL;
+    t->index_usable = 0;
 
     snprintf(path, sizeof path, "%s/%s.schema", db->data_dir, name);
     st = schema_load(path, &t->schema, err);
@@ -91,14 +115,12 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
         return st;
     }
 
+    // 빈 트리도 못 만들면 처음부터 인덱스 없이 연다 (load_row 가 max_id 만 모은다)
     t->index = bptree_create();
-    if (t->index == NULL) {
-        return error_set(err, DB_ERR_IO, -1, "out of memory while indexing table '%s'", name);
-    }
+    t->index_usable = (t->index != NULL);
     st = load_table(db, t, err);
     if (st != DB_OK) {
-        bptree_destroy(t->index);
-        t->index = NULL;
+        db_drop_index(t);
     }
     return st;
 }
@@ -137,8 +159,7 @@ void db_close(Db *db)
     for (int i = 0; i < db->table_count; i++) {
         fclose(db->tables[i].fp);
         db->tables[i].fp = NULL;
-        bptree_destroy(db->tables[i].index);
-        db->tables[i].index = NULL;
+        db_drop_index(&db->tables[i]);
     }
     db->table_count = 0;
 }
