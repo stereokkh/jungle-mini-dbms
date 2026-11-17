@@ -211,6 +211,50 @@ static void test_scan_values(void)
     remove_dir(dir);
 }
 
+// offset 을 알면 그 줄 하나만 읽는다. 테이블을 열 때 만든 인덱스가 그 offset 을 갖고 있다.
+static void test_read_at(void)
+{
+    char dir[64];
+    Db db;
+    Table *t;
+    DbError err;
+    Collected c = {0};
+    long offset = -1;
+
+    make_dir(dir, sizeof dir);
+    write_file(dir, "users.schema", USERS_SCHEMA);
+    write_file(dir, "users.csv",
+               "7,\"He said \"\"hi\"\"\",-5\n"
+               "2,\"\",0\n"
+               "3,\"김건호\",30\n");
+
+    assert(db_open(dir, &db, &err) == DB_OK);
+    assert(db_get_table(&db, "users", &t, &err) == DB_OK);
+
+    // 테이블을 열면서 줄마다 (id, offset) 이 인덱스에 들어갔다
+    assert(t->index->count == 3);
+    assert(bptree_search(t->index, 3, &offset) == 1 && offset == 29);
+    assert(bptree_search(t->index, 7, &offset) == 1 && offset == 0);
+    assert(bptree_search(t->index, 4, &offset) == 0);
+
+    assert(storage_read_at(&db, t, 29, collect, &c, &err) == DB_OK);
+    assert(c.count == 1 && c.offsets[0] == 29);
+    assert(c.rows[0][0].i == 3 && strcmp(c.rows[0][1].s, "김건호") == 0);
+
+    // 방금 붙인 줄도 fflush 뒤에 읽힌다
+    assert(storage_append(t, "8,\"new\",1", &offset, &err) == DB_OK);
+    memset(&c, 0, sizeof c);
+    assert(storage_read_at(&db, t, offset, collect, &c, &err) == DB_OK);
+    assert(c.count == 1 && c.rows[0][0].i == 8);
+
+    // 줄의 중간을 가리키면 깨진 줄로 읽히고, 파일 끝을 넘으면 줄이 없다
+    assert(storage_read_at(&db, t, 1, collect, &c, &err) == DB_ERR_IO);
+    assert(storage_read_at(&db, t, 100000, collect, &c, &err) == DB_ERR_IO);
+
+    db_close(&db);
+    remove_dir(dir);
+}
+
 // 데이터 파일 내용을 content 로 써 놓고 테이블을 열 때의 결과를 돌려준다.
 static DbStatus open_with_data(const char *content, DbError *err)
 {
@@ -318,6 +362,7 @@ int main(void)
     test_schema_errors();
     test_append_and_reopen();
     test_scan_values();
+    test_read_at();
     test_corrupt_data();
     test_db_errors();
     printf("test_storage: ok\n");

@@ -147,8 +147,14 @@ static DbStatus run_insert(Table *t, const Statement *stmt, ExecResult *result, 
     if ((st = storage_append(t, line, &offset, err)) != DB_OK) return st;
 
     // 저장에 성공한 뒤에만 id 를 넘긴다. 실패한 INSERT 가 id 를 먹지 않게 하려는 것이다.
-    result->inserted_id = t->next_id;
+    long long id = t->next_id;
+    result->inserted_id = id;
     t->next_id++;
+
+    // 방금 쓴 줄을 인덱스에 등록한다. 이후 `WHERE id = N` 은 이 offset 으로 바로 간다.
+    if (bptree_insert(t->index, id, offset) != 0) {
+        return error_set(err, DB_ERR_IO, -1, "out of memory while indexing table '%s'", t->name);
+    }
     return DB_OK;
 }
 
@@ -288,6 +294,18 @@ static int select_row(const Value *fields, int field_count, long offset, void *c
     return 0;
 }
 
+// 인덱스를 쓸 수 있는 조건인가: WHERE 전체가 `id = 정수` 하나일 때만 1.
+// AND/OR/NOT 으로 묶였거나 <, > 같은 비교면 0 이고, 그때는 선형 탐색한다.
+// id 는 항상 스키마의 첫 컬럼이다 (schema_load 가 보장한다).
+// 값이 정수라는 것은 check_cond_types 가 이미 확인했다.
+static int is_id_lookup(const Table *t, const Cond *where)
+{
+    return where != NULL
+        && where->type == COND_COMPARE
+        && where->op == OP_EQ
+        && find_column(&t->schema, where->column) == 0;
+}
+
 static DbStatus run_select(Db *db, Table *t, const Statement *stmt, RowCallback on_row,
                            void *ctx, ExecResult *result, DbError *err)
 {
@@ -299,7 +317,17 @@ static DbStatus run_select(Db *db, Table *t, const Statement *stmt, RowCallback 
     }
     plan.on_row = on_row;
     plan.ctx = ctx;
-    st = storage_scan(db, t, select_row, &plan, err);
+
+    if (is_id_lookup(t, stmt->where)) {
+        // 인덱스 탐색: 트리에서 offset 을 찾아 그 한 줄만 읽는다. 없는 id 면 파일을 열지도 않는다.
+        long offset;
+        if (bptree_search(t->index, stmt->where->value.i, &offset)) {
+            st = storage_read_at(db, t, offset, select_row, &plan, err);
+        }
+    } else {
+        // 선형 탐색: 파일을 처음부터 끝까지 읽으며 줄마다 조건을 본다.
+        st = storage_scan(db, t, select_row, &plan, err);
+    }
     result->row_count = plan.row_count;
     return st;
 }

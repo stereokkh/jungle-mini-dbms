@@ -17,30 +17,69 @@ DbStatus db_open(const char *data_dir, Db *db, DbError *err)
     return DB_OK;
 }
 
-// storage_scan 콜백: 지금까지 본 id 중 가장 큰 것을 ctx 에 남긴다.
+// 테이블을 열면서 파일을 한 번 훑는 동안 모으는 것
+typedef struct {
+    long long max_id;         // 지금까지 본 id 중 가장 큰 것
+    BPTree   *index;          // (id, offset) 을 넣을 트리
+    int       out_of_memory;  // 트리에 넣다가 메모리가 모자랐으면 1
+} LoadState;
+
+// storage_scan 콜백: 줄마다 가장 큰 id 를 기억하고, (id, 그 줄의 offset) 을 인덱스에 넣는다.
 // 저장소가 스키마와 맞는 줄만 넘겨주므로 첫 필드는 항상 INT 다.
-static int keep_max_id(const Value *fields, int field_count, long offset, void *ctx)
+static int load_row(const Value *fields, int field_count, long offset, void *ctx)
 {
-    long long *max_id = ctx;
+    LoadState *load = ctx;
+    long long id = fields[0].i;
 
     (void)field_count;
-    (void)offset;
-    if (fields[0].i > *max_id) {
-        *max_id = fields[0].i;
+    if (id > load->max_id) {
+        load->max_id = id;
+    }
+    if (bptree_insert(load->index, id, offset) != 0) {
+        load->out_of_memory = 1;
+        return 1;   // 그만 읽는다
     }
     return 0;
 }
 
-// 빈 칸 t 에 테이블을 연다: 스키마 읽기 → next_id 정하기 → 데이터 파일을 "ab" 로 열기.
-// 파일을 맨 마지막에 열어서, 중간에 실패해도 닫을 것이 없다.
+// 스키마를 읽은 뒤의 나머지: 파일을 훑어 next_id 와 인덱스 만들기 → 데이터 파일을 "ab" 로 열기.
+// 실패하면 만들던 인덱스는 부른 쪽(open_table)이 해제한다.
+static DbStatus load_table(Db *db, Table *t, DbError *err)
+{
+    char path[512];     // data_dir(255) + '/' + name(63) + ".csv" 가 항상 들어가는 크기
+    LoadState load = { 0, t->index, 0 };
+
+    DbStatus st = storage_scan(db, t, load_row, &load, err);
+    if (st != DB_OK) {
+        return st;
+    }
+    if (load.out_of_memory) {
+        return error_set(err, DB_ERR_IO, -1, "out of memory while indexing table '%s'", t->name);
+    }
+    // 가장 큰 id 가 long long 의 끝이면 +1 이 넘친다 (정의되지 않은 동작). 더하기 전에 막는다.
+    if (load.max_id == LLONG_MAX) {
+        return error_set(err, DB_ERR_IO, -1, "table '%s' has no ids left", t->name);
+    }
+    t->next_id = load.max_id + 1;
+
+    snprintf(path, sizeof path, "%s/%s.csv", db->data_dir, t->name);
+    t->fp = fopen(path, "ab");
+    if (t->fp == NULL) {
+        return error_set(err, DB_ERR_IO, -1, "cannot open data file '%s'", path);
+    }
+    return DB_OK;
+}
+
+// 빈 칸 t 에 테이블을 연다: 스키마 읽기 → 빈 인덱스 만들기 → load_table.
+// 파일을 맨 마지막에 열어서, 중간에 실패하면 인덱스만 해제하면 된다.
 static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
 {
     char path[512];     // data_dir(255) + '/' + name(63) + ".schema" 가 항상 들어가는 크기
-    long long max_id = 0;
     DbStatus st;
 
     strcpy(t->name, name);  // 길이는 db_get_table 이 이미 검사했다
     t->fp = NULL;
+    t->index = NULL;
 
     snprintf(path, sizeof path, "%s/%s.schema", db->data_dir, name);
     st = schema_load(path, &t->schema, err);
@@ -52,22 +91,16 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
         return st;
     }
 
-    st = storage_scan(db, t, keep_max_id, &max_id, err);
+    t->index = bptree_create();
+    if (t->index == NULL) {
+        return error_set(err, DB_ERR_IO, -1, "out of memory while indexing table '%s'", name);
+    }
+    st = load_table(db, t, err);
     if (st != DB_OK) {
-        return st;
+        bptree_destroy(t->index);
+        t->index = NULL;
     }
-    // 가장 큰 id 가 long long 의 끝이면 +1 이 넘친다 (정의되지 않은 동작). 더하기 전에 막는다.
-    if (max_id == LLONG_MAX) {
-        return error_set(err, DB_ERR_IO, -1, "table '%s' has no ids left", name);
-    }
-    t->next_id = max_id + 1;
-
-    snprintf(path, sizeof path, "%s/%s.csv", db->data_dir, name);
-    t->fp = fopen(path, "ab");
-    if (t->fp == NULL) {
-        return error_set(err, DB_ERR_IO, -1, "cannot open data file '%s'", path);
-    }
-    return DB_OK;
+    return st;
 }
 
 DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)
@@ -104,6 +137,8 @@ void db_close(Db *db)
     for (int i = 0; i < db->table_count; i++) {
         fclose(db->tables[i].fp);
         db->tables[i].fp = NULL;
+        bptree_destroy(db->tables[i].index);
+        db->tables[i].index = NULL;
     }
     db->table_count = 0;
 }

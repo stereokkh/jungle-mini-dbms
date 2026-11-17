@@ -1,0 +1,34 @@
+#ifndef BPTREE_H
+#define BPTREE_H
+
+// 메모리 기반 B+ 트리. 키는 행의 id, 값은 그 행이 데이터 파일에서 시작하는 offset 이다.
+// 행 자체는 트리에 넣지 않는다. 트리로 offset 을 찾고, 파일에서 그 한 줄만 읽는다.
+//
+// 삽입과 검색만 있다. DELETE 문이 없어서 삭제는 만들지 않았다.
+
+// 노드 하나에 들어가는 키의 최대 개수. 이 수를 넘으면 노드를 둘로 나눈다.
+// 클수록 트리가 낮아진다. 128 이면 100만 건이 3~4 단계에 들어간다.
+#define BPTREE_MAX_KEYS 128
+
+typedef struct BPNode BPNode;
+
+typedef struct {
+    BPNode   *root;     // 처음에는 빈 리프 하나
+    long long count;    // 들어 있는 키의 개수
+    int       height;   // 루트에서 리프까지의 단계 수. 리프 하나뿐이면 1
+} BPTree;
+
+// 빈 트리를 만든다. 메모리가 없으면 NULL.
+BPTree *bptree_create(void);
+
+// (key, offset) 을 넣는다. 이미 있는 key 면 offset 만 새 값으로 바꾼다.
+// 성공하면 0, 메모리가 없으면 -1. -1 을 받은 뒤에는 그 트리를 더 쓰지 않는다.
+int bptree_insert(BPTree *tree, long long key, long offset);
+
+// key 를 찾으면 *offset 에 값을 넣고 1, 없으면 0 을 돌려준다.
+int bptree_search(const BPTree *tree, long long key, long *offset);
+
+// 모든 노드와 트리를 해제한다. NULL 을 넘겨도 된다.
+void bptree_destroy(BPTree *tree);
+
+#endif
