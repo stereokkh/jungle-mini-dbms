@@ -16,17 +16,17 @@
 
 ## 1. 사용한 기술
 
-| 기술 | 어디에 | 왜 |
-|---|---|---|
-| **C11** | 서버 전체 | 엔진(`src/`)이 C 라서 그대로 링크해 쓴다 |
-| **BSD 소켓 API** (`socket`, `bind`, `listen`, `accept`, `recv`, `send`) | `main.c`, `http.c` | 라이브러리 없이 TCP 서버를 직접 만든다 |
-| **HTTP/1.1** (직접 파싱) | `http.c` | 요청 줄 + 헤더 + `Content-Length` 본문만 지원하는 최소 구현 |
-| **JSON** (문자열로 직접 작성) | 응답 본문 | 클라이언트가 결과를 읽기 쉽다 |
-| **POSIX 시그널** (`sigaction`, `SIGPIPE`, `SIGINT`) | `main.c` | 끊긴 소켓에 써도 안 죽기, Ctrl+C 로 정상 종료 |
-| **소켓 타임아웃** (`SO_RCVTIMEO`) | `main.c` | 요청을 끝까지 안 보내는 클라이언트가 서버를 붙잡지 못하게 |
-| **Make** | `Makefile` | 빌드, 테스트 실행 |
-| **Docker** (`gcc:13`) | 빌드 환경 | Windows 에서도 Linux 소켓 API 로 빌드·실행 |
-| **assert / bash + curl** | `tests/` | 단위 테스트 / 실제 서버를 띄운 기능 테스트 |
+| 기술                                                                    | 어디에                | 왜                                           |
+| --------------------------------------------------------------------- | ------------------ | ------------------------------------------- |
+| **C11**                                                               | 서버 전체              | 엔진(`src/`)이 C 라서 그대로 링크해 쓴다                 |
+| **BSD 소켓 API** (`socket`, `bind`, `listen`, `accept`, `recv`, `send`) | `main.c`, `http.c` | 라이브러리 없이 TCP 서버를 직접 만든다                     |
+| **HTTP/1.1** (직접 파싱)                                                  | `http.c`           | 요청 줄 + 헤더 + `Content-Length` 본문만 지원하는 최소 구현 |
+| **JSON** (문자열로 직접 작성)                                                 | 응답 본문              | 클라이언트가 결과를 읽기 쉽다                            |
+| **POSIX 시그널** (`sigaction`, `SIGPIPE`, `SIGINT`)                      | `main.c`           | 끊긴 소켓에 써도 안 죽기, Ctrl+C 로 정상 종료              |
+| **소켓 타임아웃** (`SO_RCVTIMEO`)                                           | `main.c`           | 요청을 끝까지 안 보내는 클라이언트가 서버를 붙잡지 못하게            |
+| **Make**                                                              | `Makefile`         | 빌드, 테스트 실행                                  |
+| **Docker** (`gcc:13`)                                                 | 빌드 환경              | Windows 에서도 Linux 소켓 API 로 빌드·실행            |
+| **assert / bash + curl**                                              | `tests/`           | 단위 테스트 / 실제 서버를 띄운 기능 테스트                   |
 
 ---
 
@@ -80,7 +80,7 @@ CDH/dbms/
 
 | 함수 | 하는 일 |
 |---|---|
-| `main` | `SIGPIPE` 무시, `SIGINT/SIGTERM` 핸들러 설치 → 리스닝 소켓 열기 → `g_stop` 이 설 때까지 `accept` → `handle_client` 반복 |
+| `main` | 프로그램 시작점. ① 포트 정하기 (인자 없으면 8080) ② `SIGPIPE` 무시, `SIGINT/SIGTERM` 은 `on_signal` 로 연결 ③ `open_listener` 로 리스닝 소켓 열기 (실패하면 종료 코드 1) ④ `g_stop` 이 설 때까지 `accept` → `handle_client` 반복 ⑤ 소켓 닫고 종료 코드 0 |
 | `open_listener(port)` | `socket` → `SO_REUSEADDR` (재시작 시 포트 충돌 방지) → `bind` → `listen`. 실패하면 -1 |
 | `handle_client(fd)` | 연결 하나 처리: recv 타임아웃 설정 → 요청 읽기 → 성공이면 `route`, 실패면 오류 응답 → `close` |
 | `route(fd, req)` | 경로·메서드로 핸들러 선택. 경로 없음 404, 메서드 틀림 405 |

@@ -7,6 +7,8 @@
 #include <strings.h>
 #include <sys/socket.h>
 
+// [역할] 상태 코드를 응답 첫 줄에 쓸 표준 문구로 바꾼다. (200 → "OK", 404 → "Not Found")
+// [반환] 모르는 코드는 "Unknown"
 const char *http_reason(int status)
 {
     switch (status) {
@@ -47,6 +49,13 @@ static int find_content_length(const char *headers, const char *end, size_t *out
     return 0;
 }
 
+// [역할] 지금까지 받은 바이트 buf[0..len) 을 HTTP 요청으로 해석해 req 를 채운다.
+// [순서] 1) 빈 줄(\r\n\r\n)을 찾아 헤더가 끝났는지 본다 (없으면 "더 받아라")
+//        2) 첫 줄 "METHOD PATH HTTP/1.x" 를 sscanf 로 나눈다
+//        3) 헤더에서 Content-Length 를 찾는다
+//        4) 본문이 그 길이만큼 다 왔는지 본다
+// [반환] 0 = 완성, 1 = 아직 덜 옴, 400/413 = 잘못된 요청
+// [주의] buf 는 '\0' 으로 끝나야 한다 (strstr·sscanf 를 쓰기 때문)
 int http_parse(const char *buf, size_t len, HttpRequest *req)
 {
     // 1) 헤더 끝(빈 줄)이 와야 해석을 시작할 수 있다.
@@ -76,6 +85,10 @@ int http_parse(const char *buf, size_t len, HttpRequest *req)
     return 0;
 }
 
+// [역할] 소켓 fd 에서 요청 하나를 끝까지 받는다.
+// [기능] recv 로 받은 바이트를 buf 에 계속 이어 붙이고, 받을 때마다 http_parse 로 "다 왔나?" 확인한다.
+//        TCP 는 한 번에 다 온다는 보장이 없어서 이렇게 반복해야 한다.
+// [반환] 0 = 성공(req 완성), 400/408/413 = 잘못된 요청·시간 초과·너무 큼, -1 = 아무것도 안 보내고 끊김
 int http_read_request(int fd, char *buf, HttpRequest *req)
 {
     size_t len = 0;
@@ -112,6 +125,9 @@ static void send_all(int fd, const char *data, size_t len)
     }
 }
 
+// [역할] JSON 응답 하나를 보낸다.
+// [기능] 응답 머리(상태 줄 + Content-Type + Content-Length + Connection: close + 빈 줄)를 만들어 보내고,
+//        이어서 본문 json 을 보낸다. Content-Length 가 있어야 클라이언트가 본문 끝을 안다.
 void http_send_json(int fd, int status, const char *json)
 {
     char head[256];
@@ -127,6 +143,7 @@ void http_send_json(int fd, int status, const char *json)
     send_all(fd, json, body_len);
 }
 
+// [역할] 오류 응답을 보낸다. 본문 모양: {"ok":false,"error":"message"}
 void http_send_error(int fd, int status, const char *message)
 {
     char body[512];

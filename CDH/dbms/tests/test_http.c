@@ -56,6 +56,7 @@ static void test_too_large(void)
     assert(parse("POST / HTTP/1.1\r\nContent-Length: 70000\r\n\r\n") == 413);
 }
 
+// [역할] 테스트 함수를 차례로 실행한다. assert 하나라도 실패하면 그 자리에서 멈추고 실패 위치를 출력한다.
 int main(void)
 {
     test_get();
