@@ -60,6 +60,37 @@ static int reply_error(Buf *out, int status, const char *message)
     return status;
 }
 
+// 테이블이 이미 열려 있는가. Db.tables 는 쓰기 락 안에서만 바뀌므로 읽기 락을 쥐고 봐도 된다.
+static int table_is_open(const Db *db, const char *name)
+{
+    for (int i = 0; i < db->table_count; i++) {
+        if (strcmp(db->tables[i].name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// 문장에 맞는 락을 잡는다.
+//   INSERT → 쓰기 락: next_id, B+ 트리, 파일 끝을 바꾼다. 혼자 들어간다.
+//   SELECT → 읽기 락: 공유 상태를 읽기만 한다. SELECT 끼리는 동시에 들어간다.
+// 예외: 처음 쓰는 테이블의 SELECT 는 execute 안의 db_get_table 이 테이블을 열면서
+//       Db.tables 에 등록하고 B+ 트리를 만든다(= 쓰기). 그래서 이때만 쓰기 락으로 바꾼다.
+static void lock_for(Server *s, const Statement *stmt)
+{
+    if (stmt->type == STMT_SELECT) {
+        pthread_rwlock_rdlock(&s->db_lock);
+        if (table_is_open(s->db, stmt->table)) {
+            return;
+        }
+        // 읽기 락을 쥔 채로 쓰기 락을 달라고 하면 자기 자신을 기다리는 데드락이 된다.
+        // 그래서 놓고 다시 잡는다. 그 사이에 다른 워커가 먼저 열어 두었어도
+        // db_get_table 이 열린 것을 찾아서 돌려주므로 문제없다.
+        pthread_rwlock_unlock(&s->db_lock);
+    }
+    pthread_rwlock_wrlock(&s->db_lock);
+}
+
 // 토큰이 ";" 하나뿐인 빈 문장인가
 static int is_empty_statement(const Token *toks, int count)
 {
@@ -102,7 +133,7 @@ int server_handle_sql(Server *s, const char *sql, Buf *out)
         return reply_error(out, status_of(st), err.message);
     }
 
-    // 4) execute: 모든 워커가 함께 쓰는 Db 를 건드리므로 db_lock 안에서 한 번에 하나씩만 부른다.
+    // 4) execute: 모든 워커가 함께 쓰는 Db 를 건드리므로 db_lock 으로 감싼다.
     //    락이 없으면 (실제로 깨뜨려 본 결과) 같은 id 가 두 번 붙고, INSERT 가 사라지고,
     //    재시작하면 "duplicate id" 로 테이블을 못 연다.
     //    락 안에서는 메모리 작업만 한다. 소켓을 읽고 쓰는 일은 락 밖에서 한다
@@ -112,7 +143,7 @@ int server_handle_sql(Server *s, const char *sql, Buf *out)
     if (stmt.type == STMT_SELECT) {
         buf_append(out, "{\"ok\":true,\"rows\":[");   // 행은 콜백이 이 뒤에 이어 붙인다
     }
-    pthread_mutex_lock(&s->db_lock);
+    lock_for(s, &stmt);
     st = execute(s->db, &stmt, json_row, &sink, &res, &err);
     if (st == DB_OK && stmt.type == STMT_INSERT) {
         // 200 을 보내기 전에 행을 stdio 버퍼(유저 공간)에서 커널로 넘긴다.
@@ -122,7 +153,8 @@ int server_handle_sql(Server *s, const char *sql, Buf *out)
             st = error_set(&err, DB_ERR_IO, -1, "cannot write to table '%s'", stmt.table);
         }
     }
-    pthread_mutex_unlock(&s->db_lock);   // 위에서 return 하는 길이 없어서 여기 한 곳에서만 푼다
+    pthread_rwlock_unlock(&s->db_lock);   // 읽기 락이든 쓰기 락이든 푸는 함수는 같다.
+                                          // 위에서 return 하는 길이 없어서 여기 한 곳에서만 푼다
     statement_free(&stmt);   // 실패해도 조건 트리는 해제한다
     if (st != DB_OK) {
         return reply_error(out, status_of(st), err.message);
@@ -227,10 +259,17 @@ int server_run(Db *db, int port, int thread_count)
     if (s.listen_fd < 0) {
         return -1;
     }
-    pthread_mutex_init(&s.db_lock, NULL);   // 워커가 뜨기 전에 만들어 둔다
+    // 워커가 뜨기 전에 만들어 둔다.
+    // 기본 rwlock 은 읽기 우선이라 SELECT 가 끊임없이 오면 INSERT 가 영원히 못 들어갈 수 있다(기아).
+    // 쓰기를 기다리는 워커가 있으면 새 읽기를 막는 glibc 옵션으로 그걸 막는다.
+    pthread_rwlockattr_t attr;
+    pthread_rwlockattr_init(&attr);
+    pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+    pthread_rwlock_init(&s.db_lock, &attr);
+    pthread_rwlockattr_destroy(&attr);
     if (threadpool_start(&s.pool, thread_count, server_handle_client, &s) != 0) {
         fprintf(stderr, "Error: cannot start %d workers (1..%d)\n", thread_count, MAX_WORKERS);
-        pthread_mutex_destroy(&s.db_lock);
+        pthread_rwlock_destroy(&s.db_lock);
         close(s.listen_fd);
         return -1;
     }

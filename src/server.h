@@ -9,7 +9,7 @@
 // accept 스레드는 연결을 큐에 넣기만 하고, 워커들이 꺼내서 처리한다.
 typedef struct {
     Db             *db;         // main 이 한 번만 열어 둔 DB. 모든 워커가 함께 쓴다
-    pthread_mutex_t db_lock;    // 그래서 execute 는 한 번에 한 워커만 부른다
+    pthread_rwlock_t db_lock;   // 그래서 execute 를 감싼다. SELECT 끼리는 함께, INSERT 는 혼자 들어간다
     int             listen_fd;  // 입구 역할만 하는 소켓
     ThreadPool      pool;
 } Server;

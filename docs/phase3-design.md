@@ -43,7 +43,12 @@ Phase 1+2의 엔진(`tokenize_next` → `parse` → `execute`)을 그대로 쓰�
 | `Table.fp` | 두 줄이 섞여서 파일에 쓰임 |
 | `Table.index` (B+ 트리) | 노드를 쪼개는 중에 다른 스레드가 읽어 잘못된 포인터를 따라감 |
 
-**락 정책: `pthread_mutex_t` 하나로 `execute` 호출 전체를 감싼다.** SELECT끼리도 동시에 못 돈다. 단순해서 틀릴 곳이 없다.
+**락 정책: `pthread_rwlock_t` 하나로 `execute` 호출 전체를 감싼다.** (처음에는 mutex 하나였다)
+- INSERT는 쓰기 락, SELECT는 읽기 락. SELECT끼리는 동시에 돈다
+- 예외: 아직 안 열린 테이블의 SELECT는 쓰기 락. `db_get_table`이 테이블을 처음 열 때 `Db.tables`에 등록하고 B+ 트리를 만들기 때문이다. 읽기 락을 놓고 쓰기 락을 다시 잡는다 (쥔 채로 올리면 데드락)
+- `storage_scan`의 `fflush(t->fp)`는 읽기 락 안에서 여러 스레드가 동시에 부를 수 있지만, glibc의 stdio 함수는 `FILE`마다 내부 락을 잡으므로 안전하다. INSERT가 쓰기 락 안에서 이미 `fflush`하므로 버퍼도 비어 있다
+- 쓰기 우선(`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`)으로 만든다. 기본값(읽기 우선)이면 SELECT가 계속 들어올 때 INSERT가 굶는다
+- 측정 (30만 행, 선형 탐색 SELECT 8개 동시, 워커 8개, 코어 8개): mutex 202ms → rwlock 73ms. 그 사이에 보낸 `WHERE id = 7`은 161ms → 7.6ms
 `tokenize_next`와 `parse`는 요청마다 따로 가진 지역 변수만 쓰므로 락 밖에서 부른다.
 
 ## API
@@ -262,7 +267,7 @@ docker compose run --rm dev bash -c "make && (./build/mini-dbms --server 8080 &)
 
 1. **행을 배열로 보낸다** (`[1,"Kim",20]`). 객체(`{"id":1,"name":"Kim"}`)로 하려면 `RowCallback`에 컬럼 이름을 넘기도록 시그니처를 바꿔야 한다
 2. **요청 하나에 문장 하나.** 여러 문장을 허용하면 중간에 실패했을 때 응답 모양을 따로 정해야 한다
-3. **락은 mutex 하나.** `rwlock`으로 SELECT끼리 동시에 돌리려면 `storage_scan`의 `fflush(t->fp)`가 읽기 락 안에서 불리는 문제를 먼저 풀어야 한다
+3. ~~**락은 mutex 하나.**~~ → rwlock으로 바꿨다 (위 "락 정책" 참고)
 4. **INSERT마다 `fflush`.** 안전하지만 INSERT가 느려진다. 100만 건 넣기는 CLI로 한다고 가정했다
 5. **큐가 꽉 차면 503.** accept 스레드가 자리가 날 때까지 기다리는 방법도 있다
 6. **종료 처리(모듈 6)** 를 할 것인가. 시간이 모자라면 4번의 `fflush`만으로도 데이터는 지켜진다
