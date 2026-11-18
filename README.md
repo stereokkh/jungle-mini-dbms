@@ -46,6 +46,8 @@ make clean
 
 `WHERE id = 정수`는 메모리의 B+ 트리 인덱스로 찾습니다. 구조와 실패 처리, 성능 측정 결과는 [Phase 2 문서](docs/phase2-bplus-tree.md)에 있습니다. 인덱스가 파일과 어긋나지 않도록, 실행 중에는 `data/`의 CSV 파일을 직접 고치지 않습니다.
 
+Phase 3(API 서버)는 [개념 문서](docs/phase3-api-server-concepts.md)로 배경을 익히고, [단계별 개발 설계](docs/phase3-step-design.md)의 선택지와 결정 기록을 따라 진행합니다.
+
 ## 5. 브랜치 전략
 
 | 브랜치 | 용도 |
