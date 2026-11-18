@@ -3,6 +3,7 @@
 #   make          build/dbms-server
 #   make test     단위 테스트 (HTTP 파서, SQL 실행기, JSON-RPC)
 #   make e2e      서버를 띄우고 curl 로 기능 테스트
+#   make bench    작업자 스레드 수(1/2/4/8)별 성능 비교
 #   make run      서버 실행 (PORT=8080 THREADS=4, 데이터는 저장소 루트의 data/)
 #
 # DB 엔진은 저장소 루트의 src/ (Phase 1+2) 를 그대로 가져다 쓴다.
@@ -18,7 +19,7 @@ ENGINE_SRCS := $(filter-out $(ENGINE)/main.c,$(wildcard $(ENGINE)/*.c))
 SERVER_SRCS := server/http.c server/json.c server/pool.c server/query.c server/rpc.c
 HEADERS     := $(wildcard server/*.h) $(wildcard $(ENGINE)/*.h)
 
-.PHONY: all test e2e run clean
+.PHONY: all test e2e bench run clean
 
 all: build/dbms-server
 
@@ -37,6 +38,13 @@ test: build/test_http build/test_query build/test_rpc
 
 e2e: build/dbms-server
 	bash tests/e2e.sh
+
+build/bench: tests/bench.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< -pthread
+
+bench: build/dbms-server build/bench
+	bash tests/bench.sh
 
 run: build/dbms-server
 	./build/dbms-server $(PORT) $(DATA) $(THREADS)

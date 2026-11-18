@@ -36,11 +36,14 @@ static Db g_db;
 static volatile sig_atomic_t g_stop = 0;
 
 // [역할] Ctrl+C(SIGINT)·kill(SIGTERM) 을 받으면 OS 가 대신 불러 주는 함수.
-// [기능] 종료 플래그 g_stop 만 1 로 바꾼다. 실제 정리는 main 의 루프가 플래그를 보고 한다.
+// [기능] 첫 번째: 종료 플래그 g_stop 만 1 로 바꾼다. 실제 정리는 main 의 루프가 플래그를 보고 한다.
 //        (시그널 핸들러 안에서 printf·free 같은 함수를 부르면 위험하기 때문)
+//        두 번째: 정리를 기다리지 않고 바로 끝낸다 (강제 종료). 처리 중이던 요청은 응답을 못 받는다.
+//        _exit 는 시그널 핸들러에서 불러도 안전한 함수다 (exit 와 달리 atexit·stdio 정리를 안 함).
 static void on_signal(int sig)
 {
     (void)sig;
+    if (g_stop) _exit(130);   // 130 = 128 + SIGINT(2). 셸에서 Ctrl+C 로 끝난 프로그램의 관례
     g_stop = 1;
 }
 
@@ -143,7 +146,8 @@ static void handle_client(int fd)
 //   3) open_listener 로 리스닝 소켓을 연다. 실패하면(포트 사용 중 등) 종료 코드 1
 //   4) 스레드 풀 시작: 작업자들은 SIGINT/SIGTERM 을 막은 채로 태어나게 한다
 //   5) 메인 루프: accept 로 연결을 받고 → pool_submit 으로 큐에 넣기 (큐가 꽉 차면 503)
-//   6) 정리: 리스닝 소켓 닫기 → pool_stop(남은 요청 마저 처리 후 작업자 종료) → DB 닫기 → 종료 코드 0
+//   6) 정리 (우아한 종료): 리스닝 소켓 닫기 → pool_stop(받아 둔 요청 마저 처리 후 작업자 종료)
+//      → DB 닫기 → 종료 코드 0.   정리 중 Ctrl+C 를 한 번 더 누르면 on_signal 이 바로 끝낸다(130)
 // [인자] argv[1] = 포트 번호, argv[2] = 데이터 폴더, argv[3] = 작업자 스레드 수 (모두 선택)
 // [반환] 0 = 정상 종료, 1 = 서버 시작 실패
 int main(int argc, char **argv)
@@ -207,10 +211,12 @@ int main(int argc, char **argv)
     }
 
     // 6) 정리
-    printf("shutting down\n");
+    printf("shutting down: finishing accepted requests (Ctrl+C again to force)\n");
     fflush(stdout);
-    close(lfd);        // 새 연결은 더 받지 않는다
+    close(lfd);        // 새 연결은 더 받지 않는다 (이제 접속하면 connection refused)
     pool_stop();       // 이미 받은 요청은 끝까지 처리하고 작업자들이 끝난다
+                       // 요청을 덜 보낸 손님이 있어도 최대 TIMEOUT_SEC 뒤에는 408 로 끝난다
     db_close(&g_db);   // 열어 둔 테이블 파일을 닫고(버퍼를 디스크로 내림) 인덱스를 해제
+    printf("bye\n");
     return 0;
 }

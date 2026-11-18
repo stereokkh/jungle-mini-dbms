@@ -78,9 +78,37 @@ wait "${JOBS[@]}"   # 그냥 wait 하면 서버(백그라운드)까지 기다려
 check "40 parallel INSERTs all saved" "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":42'
 check "ids are unique (last id 42)"   "$(query 'SELECT id FROM users WHERE id = 42;' | grep -o '"row_count":[0-9]*')" '"row_count":1'
 
+echo "[4단계] 안전한 종료"
+# 처리 중인 요청은 Ctrl+C 뒤에도 끝까지 응답을 받는다.
+# 헤더만 먼저 보내 작업자가 본문을 기다리게 한 상태에서 Ctrl+C → 그다음 본문을 보낸다.
+PING='{"jsonrpc":"2.0","method":"ping","id":1}'   # 40 바이트
+exec 5<>"/dev/tcp/127.0.0.1/$PORT"
+printf 'POST /rpc HTTP/1.1\r\nContent-Length: %d\r\n\r\n' "${#PING}" >&5
+sleep 0.3
 kill -INT $PID
+sleep 0.3
+check "new connection refused while stopping" "$(status --max-time 2 "$URL/health")" 000
+printf '%s' "$PING" >&5
+check "in-flight request finished"  "$(timeout 5 head -1 <&5 | tr -d '\r')" "HTTP/1.1 200 OK"
+exec 5<&-
 wait $PID
 check "Ctrl+C -> exit 0"           "$?" 0
+
+# 다시 켜도 데이터가 그대로 있다 (db_close 가 파일을 닫으며 디스크로 내림)
+./build/dbms-server $PORT "$DATA" >> /tmp/dbms-e2e.log 2>&1 &
+PID=$!
+sleep 0.3
+check "data survives restart"      "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":42'
+
+# 정리가 오래 걸려도(요청을 덜 보낸 손님) Ctrl+C 를 한 번 더 누르면 바로 끝난다.
+exec 6<>"/dev/tcp/127.0.0.1/$PORT"
+sleep 0.3
+kill -INT $PID
+sleep 0.3
+kill -INT $PID
+wait $PID
+check "second Ctrl+C -> exit 130"  "$?" 130
+exec 6<&-
 
 rm -rf "$DATA"
 [[ $FAIL -eq 0 ]] && echo "e2e: all passed"
