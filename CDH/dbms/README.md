@@ -18,6 +18,7 @@
 | ---- | --------- | ---------------------------------------------------------- |
 | GET  | `/health` | 살아 있는지 확인 (모니터링 도구용 단순 HTTP) → `{"ok":true,"status":"up"}` |
 | POST | `/rpc`    | **JSON-RPC 2.0** 요청 하나                                     |
+| POST | `/query`  | `{"sql":"..."}` 한 문장 (PR #4·#6 과 같은 API) → `{"ok":true,"rows":[[1,"Kim",20]],"row_count":1}` / `{"ok":true,"inserted_id":3}` / `{"ok":false,"error":"..."}` (400·404·500) |
 
 ### JSON-RPC 메서드
 
@@ -72,7 +73,7 @@ curl -X POST localhost:8080/rpc -d '{"jsonrpc":"2.0","method":"query","params":[
 | **가변 버퍼** (`realloc` 두 배 증가) | `json.c` | SELECT 결과 크기를 미리 모르므로 |
 | **POSIX 시그널** (`sigaction`, `SIGPIPE`, `SIGINT`, `pthread_sigmask`) | `main.c` | 끊긴 소켓에 써도 안 죽기, Ctrl+C 로 정상 종료. 시그널은 main 스레드만 받게 한다 |
 | **pthread 스레드 풀** (`pthread_create/join`, `mutex`, `cond`) | `pool.c` | 작업자 N 개가 연결 큐에서 일을 꺼내 동시에 처리 |
-| **pthread rwlock** (쓰기 우선) | `query.c` | 테이블마다: SELECT 는 함께, INSERT 는 혼자 |
+| **pthread rwlock** (쓰기 우선) | 엔진 `src/db.c`·`executor.c` | 테이블마다: SELECT 는 함께, INSERT 는 혼자 (PR #4 에서 엔진으로 옮김) |
 | **ThreadSanitizer** (`-fsanitize=thread`) | 검증 | 데이터 경합(data race)이 없는지 확인 |
 | **소켓 타임아웃** (`SO_RCVTIMEO`) | `main.c` | 요청을 끝까지 안 보내는 클라이언트가 서버를 붙잡지 못하게 |
 | **Make** | `Makefile` | 빌드, 테스트 실행 |
@@ -101,10 +102,8 @@ curl -X POST localhost:8080/rpc -d '{"jsonrpc":"2.0","method":"query","params":[
                               │    │          └─ call_method     method 이름으로 분기 (-32601)
                               │    │               └─ query_run                           [query.c]
                               │    │                    ├─ tokenize_next → parse          (락 없음)
-                              │    │                    ├─ lock_for   테이블 rwlock (SELECT=읽기, INSERT=쓰기)
                               │    │                    ├─ execute                         [엔진 src/]
                               │    │                    │       └─ on_row  행마다 JSON 으로
-                              │    │                    ├─ unlock_for
                               │    │                    └─ {"results":[...]}
                               │    │          └─ make_result / make_error  {"jsonrpc","result|error","id"}
                               │    └─ http_send_json      HTTP 200 + JSON-RPC 응답       [http.c]
@@ -133,11 +132,11 @@ http.c / json.c / pool.c     ← 도구 (HTTP 읽기·쓰기 / JSON 읽기·쓰�
 7. **엔진은 그대로**: 엔진의 `RowCallback` 자리(CLI 는 `printf`)에 JSON 을 만드는 `on_row` 를 끼워 넣었다.
 8. **INSERT 는 응답 전에 디스크로** (`fflush`): 서버가 갑자기 죽어도 "성공 응답 받은 INSERT" 는 파일에 남는다.
 9. **상한을 둔다**: 요청 64KB, JSON 중첩 32 단계, 대기 큐 64 개 (넘치면 503).
-10. **락은 엔진 밖에서**: 엔진(`src/`)은 스레드를 모르므로 고치지 않고, 엔진을 부르는 `query.c` 가 락을 잡는다.
+10. **락은 엔진 안에서** (세 PR 통합 후): 처음엔 엔진을 고치지 않고 `query.c` 가 락을 잡았다. PR #4 를 합치면서 같은 락이 엔진 안으로 들어가 서버 쪽 락은 지웠다 ([MERGE.md](MERGE.md)). 엔진 안에 있으면 CLI·서버 어느 쪽에서 불러도 보호된다.
 11. **테이블마다 rwlock**: SELECT 는 읽기 락이라 같은 테이블도 여럿이 동시에 읽는다. INSERT 는 쓰기 락이라 `next_id`·B+ 트리·파일 쓰기를 혼자 한다 → id 가 겹치거나 행이 사라지지 않는다.
-12. **테이블 목록 락 (`g_catalog`)**: 엔진은 테이블을 처음 쓸 때 목록(`Db.tables`)에 등록한다. 목록을 바꾸는 이 순간만 쓰기 락, 평소엔 읽기 락.
-13. **락 순서는 하나**: 항상 `g_catalog` → 테이블 락. 순서가 하나라 교착(deadlock)이 없다. 락은 문장 하나 동안만 잡는다 (트랜잭션 아님).
-14. **쓰기 우선 rwlock**: 기본 rwlock 은 SELECT 가 끊이지 않으면 INSERT 가 영원히 못 들어간다(기아). `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP` 로 막는다.
+12. **테이블 목록 락 (`Db.tables_mutex`)**: 엔진은 테이블을 처음 쓸 때 목록(`Db.tables`)에 등록한다. `db_get_table` 이 mutex 안에서 "찾기 → 없으면 열어서 등록" 을 한 번에 한다.
+13. **락이 겹치지 않는다**: 목록 mutex 는 `db_get_table` 이 끝나면 풀고, 그다음 테이블 락을 잡는다. 두 락을 동시에 쥐지 않아서 교착(deadlock)이 없다. 락은 문장 하나 동안만 잡는다 (트랜잭션 아님).
+14. **쓰기 우선 rwlock**: 기본 rwlock 은 SELECT 가 끊이지 않으면 INSERT 가 영원히 못 들어간다(기아). 엔진의 `open_table` 이 `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP` 로 만든다.
 15. **시그널은 main 만**: 작업자를 만들기 전에 `SIGINT/SIGTERM` 을 막고, main 에서만 푼다. 작업자가 Ctrl+C 를 받아 버리면 main 의 `accept` 가 안 깨어나기 때문이다.
 16. **우아한 종료(graceful shutdown)**: Ctrl+C → `accept` 중단·리스닝 소켓 닫기(새 연결은 거절) → `pool_stop` 이 처리 중·대기 중인 요청까지 끝내고 작업자를 `join` → `db_close` 로 파일을 디스크로 내림 → 종료 코드 0. 요청을 덜 보낸 손님이 있어도 `TIMEOUT_SEC`(5초) 뒤 408 로 끝나므로 종료가 영원히 걸리지 않는다.
 17. **두 번째 Ctrl+C 는 강제 종료**: 정리를 기다리기 싫으면 한 번 더 누른다. 핸들러가 `_exit(130)` 을 부른다 (`_exit` 는 시그널 핸들러에서 불러도 안전한 함수). INSERT 는 응답 전에 이미 `fflush` 했으므로 성공 응답을 받은 데이터는 남는다.
@@ -157,18 +156,21 @@ http.c / json.c / pool.c     ← 도구 (HTTP 읽기·쓰기 / JSON 읽기·쓰�
 
 ```
 CDH/dbms/
-├── Makefile           빌드·테스트 명령. 엔진은 ../../src, 데이터는 ../../data
+├── Makefile           빌드·테스트 명령. 엔진은 ../../src (파일 이름을 직접 적음), 데이터는 ../../data
+├── MERGE.md           세 PR(#4·#5·#6)을 어떻게 섞었나
 ├── server/
 │   ├── main.c         서버 본체: DB 열기, 리스닝 소켓, accept 반복, HTTP 라우팅, 시그널
 │   ├── pool.h / .c    스레드 풀: 연결 큐(mutex + cond) + 작업자 스레드 N 개
 │   ├── http.h / .c    HTTP 요청 읽기·파싱, 응답 보내기
 │   ├── rpc.h / .c     JSON-RPC 2.0: 요청 해석, 메서드 분기, 응답·오류 만들기, 오류 코드 정의
-│   ├── query.h / .c   SQL 실행기: SQL → (테이블 락) → 엔진 실행 → 결과 JSON
+│   ├── query.h / .c   SQL 실행기: SQL → 엔진 실행(락은 엔진이) → 결과 JSON
 │   └── json.h / .c    JSON 도구: 가변 버퍼에 쓰기, 문자열 읽기, 값 건너뛰기(문법 검사)
 └── tests/
     ├── test_http.c    http_parse 단위 테스트
     ├── test_query.c   query_run 단위 테스트 (임시 폴더에 테이블을 만들어서) + 스레드 8 개 동시 실행
     ├── test_rpc.c     JSON 읽기 + rpc_handle 단위 테스트 (오류 코드 전부, 알림)
+    ├── test_json.c    JSON 이스케이프·행 만들기·\uXXXX 읽기 (PR #6 테스트를 옮김)
+    ├── test_pool.c    스레드 풀: 100 개 모두 실행, 큐 64 칸 초과 시 -1, 작업자 수 범위 (PR #6 테스트를 옮김)
     ├── e2e.sh         서버를 실제로 띄우고 curl 로 확인 (느린 손님, 동시 INSERT 40 개, 종료 시나리오)
     ├── bench.c        부하 생성기: 클라이언트 스레드 N 개가 같은 SQL 을 동시에 보내고 처리량·지연을 잰다
     └── bench.sh       작업자 스레드 1/2/4/8 개로 서버를 바꿔 띄우며 bench 를 돌린다 (make bench)
@@ -188,6 +190,7 @@ CDH/dbms/
 | `handle_client(fd)`   | 연결 하나 처리 (작업자 스레드가 부름): recv 타임아웃 설정 → 요청 읽기 → 성공이면 `route`, 실패면 오류 응답 → 로그 → `close`. 버퍼는 스레드마다 자기 스택에 둔다 |
 | `route(fd, req)`      | 경로·메서드로 핸들러 선택. 경로 없음 404, 메서드 틀림 405                                                                                                                                                                                                       |
 | `handle_health(fd)`   | `GET /health` → `{"ok":true,"status":"up"}`                                                                                                                                                                                                 |
+| `handle_query(fd, req)` | `POST /query`. `read_sql_field` 로 본문 `{"sql":"..."}` 에서 SQL 을 꺼내(없으면 400) `query_run_one` 결과를 그 상태 코드로 보낸다 |
 | `handle_rpc(fd, req)` | `POST /rpc`. 본문을 `rpc_handle` 에 넘기고 응답을 HTTP 200 으로 보낸다. 알림이면 204, 메모리 부족이면 500                                                                                                                                                             |
 
 ### `server/pool.c` — 스레드 풀
@@ -228,10 +231,8 @@ CDH/dbms/
 | 함수 | 하는 일 |
 |---|---|
 | `query_run(db, sql, &err)` | **진입점.** `tokenize_next` 로 문장을 하나씩 잘라 `run_statement` 로 실행하고 `{"results":[...]}` 로 모은다. 오류가 나면 거기서 멈추고 NULL + `err` (오류 코드·메시지·실행된 문장 수). 문장이 하나도 없으면 -32602 |
-| `run_statement(...)` | 문장 하나: `parse` → `lock_for` → `execute` → `unlock_for` → `statement_free`. INSERT 면 `fflush` 후 `{"type":"insert","id":N}`, SELECT 면 `rows`·`columns`·`row_count` 객체를 붙인다 |
-| `lock_for(db, stmt, &slot)` | 실행 전 락 잡기. `g_catalog` 읽기 락 → 테이블 찾기 → 없으면 쓰기 락으로 바꿔 `db_get_table` 로 등록 후 다시 → 있으면 테이블 락 (SELECT 읽기 / INSERT 쓰기). 테이블이 없으면 락 없이 오류 |
-| `unlock_for(slot)` | 테이블 락 → `g_catalog` 순서로 푼다 |
-| `init_locks()` | `pthread_once` 로 딱 한 번: 락들을 "쓰기 우선" 속성으로 초기화 |
+| `run_statement(...)` | 문장 하나: `parse` → `execute` (테이블 락은 엔진이 잡고 INSERT 면 `fflush` 까지 한다) → `statement_free`. INSERT 면 `{"type":"insert","id":N}`, SELECT 면 `rows`·`columns`·`row_count` 객체를 붙인다 |
+| `query_run_one(db, sql, &status)` | `POST /query` 용. PR #4 의 `run_one_sql` 로 한 문장만 실행하고 PR #6 모양 `{"ok":true,"rows":...}` / `{"ok":true,"inserted_id":N}` / `{"ok":false,"error":...}` 를 만든다. 상태 코드는 400·404·500 |
 | `find_open_table(db, name)` | 열린 테이블 목록에서 이름으로 위치 찾기 (-1 = 아직 안 열림) |
 | `on_row(fields, count, ctx)` | 엔진이 SELECT 로 찾은 행마다 불러 주는 콜백. 행 하나를 `[1,"Kim",20]` 으로 붙인다 |
 | `add_columns(b, db, stmt)` | 컬럼 이름 목록. `SELECT *` 면 스키마 순서, 아니면 SQL 에 쓴 순서 |

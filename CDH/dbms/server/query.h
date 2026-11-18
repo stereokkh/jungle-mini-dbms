@@ -13,9 +13,9 @@
 //   ]}
 
 //
-// 여러 스레드가 동시에 불러도 안전하다 (3단계). 문장 하나를 실행하는 동안만 락을 잡는다.
+// 여러 스레드가 동시에 불러도 안전하다. 락은 엔진(src/db.c, executor.c)이 잡는다 (PR #4 에서 합침).
 //   - 테이블마다 rwlock: SELECT 는 읽기 락(여럿이 함께), INSERT 는 쓰기 락(혼자)
-//   - 테이블 목록 rwlock: 처음 쓰는 테이블을 목록에 등록할 때만 쓰기 락
+//   - 테이블 목록 mutex: 처음 쓰는 테이블을 열어 목록에 등록할 때
 // 여러 문장을 묶어 보내도 한 덩어리(트랜잭션)는 아니다. 문장 사이에 다른 요청이 끼어들 수 있다.
 
 // 실패 정보
@@ -29,5 +29,13 @@ typedef struct {
 // [인자] db = 열어 둔 DB, sql = '\0' 으로 끝나는 SQL 문자열, err = 실패 정보를 받을 곳
 // [반환] 성공하면 malloc 한 결과 JSON (부른 쪽이 free), 실패하면 NULL (err 가 채워진다)
 char *query_run(Db *db, const char *sql, QueryError *err);
+
+// [역할] POST /query 용: SQL 한 문장만 실행하고 PR #4·#6 과 같은 모양의 JSON 을 만든다.
+//   SELECT 성공: {"ok":true,"rows":[[1,"Kim",20]],"row_count":1}
+//   INSERT 성공: {"ok":true,"inserted_id":3}
+//   실패:        {"ok":false,"error":"..."}
+// [인자] *status = HTTP 상태 코드를 받을 곳 (200, 400 SQL 오류, 404 테이블 없음, 500 파일 오류)
+// [반환] malloc 한 JSON (부른 쪽이 free). 메모리가 모자라면 NULL
+char *query_run_one(Db *db, const char *sql, int *status);
 
 #endif

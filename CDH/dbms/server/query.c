@@ -1,99 +1,24 @@
 #include "query.h"
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "executor.h"
+#include "sql.h"
 #include "json.h"
 #include "rpc.h"
 #include "statement.h"
 #include "token.h"
 
-// ---------- 락 (3단계) ----------
+// ---------- 락 ----------
 //
-// 엔진(src/)은 스레드를 모른다. 그래서 엔진을 부르는 이 파일에서 락을 잡는다.
-//
-//   g_catalog            Db.tables 목록(어떤 테이블이 열려 있나)을 지킨다.
-//                        평소엔 읽기 락. 처음 보는 테이블을 열어 목록에 넣을 때만 쓰기 락.
-//   g_table_locks[i]     Db.tables[i] 의 내용(next_id, B+ 트리, 파일)을 지킨다.
-//                        SELECT = 읽기 락 → 여러 SELECT 가 동시에 돈다.
-//                        INSERT = 쓰기 락 → 그 테이블에서 혼자 돈다.
-//
-// SELECT 도 엔진 안에서 fflush(t->fp) 를 부른다. 하지만 INSERT 가 응답 전에 이미 비워 두어
-// 버퍼가 비어 있고, FILE 은 자체 락이 있어서 읽기 락끼리 함께 불러도 안전하다.
-// (SELECT 는 읽을 때마다 파일을 따로 fopen 하므로 읽기 위치도 서로 섞이지 않는다.)
-//
-// 잡는 순서는 항상 g_catalog → 테이블 락. 순서가 하나라서 서로 기다리다 멈추는(교착) 일이 없다.
-
-#define MAX_OPEN_TABLES (sizeof ((Db *)0)->tables / sizeof ((Db *)0)->tables[0])
-
-static pthread_rwlock_t g_catalog;
-static pthread_rwlock_t g_table_locks[MAX_OPEN_TABLES];
-static pthread_once_t   g_locks_once = PTHREAD_ONCE_INIT;
-
-// [역할] 락들을 처음 한 번만 초기화한다. (pthread_once 가 여러 스레드 중 딱 한 번만 부른다)
-// [기능] "쓰기 우선" 속성을 준다. 기본 rwlock 은 읽기가 끊이지 않으면 INSERT 가 영원히 못 들어간다.
-static void init_locks(void)
-{
-    pthread_rwlockattr_t attr;
-    pthread_rwlockattr_init(&attr);
-    pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
-
-    pthread_rwlock_init(&g_catalog, &attr);
-    for (size_t i = 0; i < MAX_OPEN_TABLES; i++) {
-        pthread_rwlock_init(&g_table_locks[i], &attr);
-    }
-    pthread_rwlockattr_destroy(&attr);
-}
-
-// [역할] 이미 열린 테이블 목록에서 name 을 찾는다. g_catalog 를 잡은 상태에서 불러야 한다.
-// [반환] 목록의 위치(0..), 아직 안 열렸으면 -1
-static int find_open_table(const Db *db, const char *name)
-{
-    for (int i = 0; i < db->table_count; i++) {
-        if (strcmp(db->tables[i].name, name) == 0) return i;
-    }
-    return -1;
-}
-
-// [역할] 문장 하나를 실행하기 전에 필요한 락을 잡는다.
-// [순서] g_catalog 읽기 락 → 테이블 찾기
-//        → 없으면: 읽기 락 풀고 쓰기 락 → db_get_table 로 열어 목록에 등록 → 풀고 처음부터 다시
-//        → 있으면: 그 테이블 락을 SELECT 면 읽기, INSERT 면 쓰기로 잡는다
-// [반환] DB_OK 면 g_catalog(읽기)와 테이블 락을 잡은 채로 돌아온다 (*slot = 테이블 위치).
-//        실패하면(테이블 없음 등) 락을 하나도 잡지 않은 채 오류를 돌려준다.
-static DbStatus lock_for(Db *db, const Statement *stmt, int *slot, DbError *err)
-{
-    pthread_once(&g_locks_once, init_locks);
-    for (;;) {
-        pthread_rwlock_rdlock(&g_catalog);
-        int i = find_open_table(db, stmt->table);
-        if (i >= 0) {
-            if (stmt->type == STMT_INSERT) pthread_rwlock_wrlock(&g_table_locks[i]);
-            else pthread_rwlock_rdlock(&g_table_locks[i]);
-            *slot = i;
-            return DB_OK;
-        }
-        pthread_rwlock_unlock(&g_catalog);
-
-        // 처음 쓰는 테이블: 목록을 바꾸므로 혼자 들어간다. 그사이 다른 스레드가 먼저 열었으면
-        // db_get_table 이 목록에서 찾기만 하고 끝난다.
-        Table *t;
-        pthread_rwlock_wrlock(&g_catalog);
-        DbStatus st = db_get_table(db, stmt->table, &t, err);
-        pthread_rwlock_unlock(&g_catalog);
-        if (st != DB_OK) return st;
-    }
-}
-
-// [역할] lock_for 가 잡은 락을 거꾸로 푼다.
-static void unlock_for(int slot)
-{
-    pthread_rwlock_unlock(&g_table_locks[slot]);
-    pthread_rwlock_unlock(&g_catalog);
-}
+// 처음(3단계)에는 엔진이 스레드를 몰라서 이 파일이 테이블 목록 rwlock + 테이블별 rwlock 을 잡았다.
+// PR #4 를 합치면서 같은 락이 엔진 안으로 들어갔다 (통합 문서: CDH/dbms/MERGE.md).
+//   - db_get_table: 테이블 목록 mutex 로 "찾기 → 없으면 열어서 등록" 을 한 번에 한다
+//   - execute:      테이블 rwlock 을 SELECT 면 읽기, INSERT 면 쓰기로 잡고 실행한다
+//   - INSERT 는 엔진이 쓰기 락 안에서 fflush 까지 한다 (응답 전에 커널로 내려감)
+// 그래서 이 파일은 락을 잡지 않는다. 같은 락을 두 번 잡으면 느려지기만 한다.
 
 // SELECT 콜백에 넘기는 상태
 typedef struct {
@@ -152,31 +77,17 @@ static int rpc_code_of(DbStatus st)
 }
 
 // [역할] 토큰으로 된 문장 하나를 파싱·실행하고, 결과 객체 하나를 b 에 붙인다.
-// [순서] parse (락 없이) → lock_for → execute (SELECT 면 on_row 가 행을 붙임) → unlock_for
-//        → statement_free
+// [순서] parse → execute (락은 엔진이 잡는다. SELECT 면 on_row 가 행을 붙임) → statement_free
 static DbStatus run_statement(Db *db, const Token *toks, int count, JsonBuf *b, DbError *err)
 {
     Statement stmt;
     ExecResult result;
-    int slot;
     DbStatus st = parse(toks, count, &stmt, err);
     if (st != DB_OK) return st;
-
-    // 파싱은 공유 자료를 안 건드리므로 락 밖에서 한다. 락은 엔진을 만지는 동안만.
-    st = lock_for(db, &stmt, &slot, err);
-    if (st != DB_OK) {
-        statement_free(&stmt);
-        return st;
-    }
 
     if (stmt.type == STMT_INSERT) {
         st = execute(db, &stmt, NULL, NULL, &result, err);
         if (st == DB_OK) {
-            // 엔진은 쓰기를 메모리 버퍼에 모아 둔다. 서버는 오래 떠 있으므로
-            // 응답 전에 디스크로 내려서, 서버가 갑자기 죽어도 "OK 받은 INSERT" 는 남게 한다.
-            Table *t;
-            if (db_get_table(db, stmt.table, &t, err) == DB_OK) fflush(t->fp);
-
             jb_str(b, "{\"type\":\"insert\",\"id\":");
             jb_int(b, result.inserted_id);
             jb_str(b, "}");
@@ -195,7 +106,6 @@ static DbStatus run_statement(Db *db, const Token *toks, int count, JsonBuf *b, 
             jb_str(b, "}");
         }
     }
-    unlock_for(slot);
     statement_free(&stmt);   // WHERE 조건 트리 해제 (실패해도 해제)
     return st;
 }
@@ -247,4 +157,58 @@ char *query_run(Db *db, const char *sql, QueryError *qe)
         return fail(qe, RPC_INTERNAL_ERROR, "out of memory", executed);
     }
     return json;
+}
+
+// [역할] 엔진 오류 코드를 HTTP 상태 코드로 바꾼다 (PR #6 의 status_of 와 같은 규칙).
+static int http_status_of(DbStatus st)
+{
+    switch (st) {
+    case DB_ERR_NO_TABLE: return 404;
+    case DB_ERR_SCHEMA:
+    case DB_ERR_IO:       return 500;   // 스키마·데이터 파일 문제 = 서버 탓
+    default:              return 400;   // 클라이언트가 보낸 SQL 이 틀렸다
+    }
+}
+
+// [역할] {"ok":false,"error":"..."} 를 만든다.
+static char *simple_error(const char *message)
+{
+    JsonBuf b = {0};
+    jb_str(&b, "{\"ok\":false,\"error\":");
+    jb_json_str(&b, message);
+    jb_str(&b, "}");
+    return jb_finish(&b);
+}
+
+char *query_run_one(Db *db, const char *sql, int *status)
+{
+    JsonBuf b = {0};
+    RowCtx rc = { &b, 0 };
+    StmtType type;
+    ExecResult result;
+    DbError err;
+
+    // 행은 실행 도중 콜백으로 붙는다. INSERT 면 아래에서 버퍼를 버리고 새로 만든다.
+    jb_str(&b, "{\"ok\":true,\"rows\":[");
+    // run_one_sql (PR #4, src/sql.c): 빈 요청·두 문장 이상을 거절하고 파싱 → 실행한다.
+    DbStatus st = run_one_sql(db, sql, on_row, &rc, &type, &result, &err);
+    if (st != DB_OK) {
+        free(jb_finish(&b));
+        *status = http_status_of(st);
+        return simple_error(err.message);
+    }
+    if (type == STMT_INSERT) {
+        free(jb_finish(&b));
+        b = (JsonBuf){0};
+        jb_str(&b, "{\"ok\":true,\"inserted_id\":");
+        jb_int(&b, result.inserted_id);
+        jb_str(&b, "}");
+    } else {
+        jb_str(&b, "],\"row_count\":");
+        jb_int(&b, result.row_count);
+        jb_str(&b, "}");
+    }
+    char *json = jb_finish(&b);
+    *status = json != NULL ? 200 : 500;
+    return json != NULL ? json : simple_error("out of memory");
 }

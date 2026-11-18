@@ -50,25 +50,22 @@ Phase 3(API 서버)는 [개념 문서](docs/phase3-api-server-concepts.md)로 �
 
 ## 5. HTTP API 서버
 
-Docker 개발 이미지를 다시 빌드하면 서버 빌드에 필요한 `libmicrohttpd`, `Jansson`, `pkg-config`가 설치됩니다. macOS에서 직접 빌드하려면 `brew install libmicrohttpd jansson pkgconf`를 실행합니다.
+Phase 3 서버는 세 PR(#4·#5·#6)을 하나로 합친 것입니다. 무엇을 어디서 가져왔는지는 [CDH/dbms/MERGE.md](CDH/dbms/MERGE.md)에, 서버 설명은 [CDH/dbms/README.md](CDH/dbms/README.md)에 있습니다. 외부 라이브러리는 쓰지 않습니다.
 
 ```sh
-make server
-./build/mini-dbms-server          # 127.0.0.1:8080, 기본 데이터 디렉터리는 data
-# ./build/mini-dbms-server /path/to/test-data
+make server                                     # = make -C CDH/dbms → CDH/dbms/build/dbms-server
+./CDH/dbms/build/dbms-server 8080 data 4        # 포트, 데이터 폴더, 작업자 수
 ```
-
-다른 터미널에서 다음처럼 요청합니다. Docker로 실행했다면 같은 컨테이너 안에서 `curl`을 실행합니다.
 
 ```sh
-curl -i http://127.0.0.1:8080/query \
-  -H 'Content-Type: application/json' \
-  --data '{"sql":"SELECT id, name FROM users WHERE id = 1;"}'
+curl -s http://127.0.0.1:8080/query -H 'Content-Type: application/json'   --data '{"sql":"SELECT id, name FROM users WHERE id = 1;"}'
+# {"ok":true,"rows":[[1,"Kim"]],"row_count":1}
 ```
 
-`POST /query`는 최대 16 KiB의 JSON 본문에서 `sql` 문자열 하나를 읽고 SQL 한 문장을 실행합니다. `SELECT`는 `{"rows":[],"row_count":0}` 형태로 행과 개수를, `INSERT`는 `{"inserted_id":1}` 형태로 생성된 ID를 돌려줍니다. 잘못된 입력은 `400`, 본문 크기 초과는 `413`, DB 파일 오류는 `500`으로 응답합니다.
-
-HTTP 스레드는 본문을 다 받은 요청을 작업 큐에 넣습니다. SQL 워커 두 개가 같은 큐에서 작업을 꺼내며, 큐에는 최대 네 건이 대기할 수 있습니다. 워커는 큐에 들어온 순서대로 요청을 꺼내고, 응답 순서는 쿼리 실행 시간에 따라 달라질 수 있습니다. 큐가 가득 찼거나 서버가 종료 중이면 새 작업에 `503`을 반환합니다. Ctrl+C로 종료하면 이미 큐에 들어간 요청은 완료될 때까지 처리합니다.
+- `POST /query` `{"sql":"..."}`: 한 문장. 성공은 `{"ok":true,...}`, 실패는 `{"ok":false,"error":"..."}`와 400/404/500
+- `POST /rpc`: JSON-RPC 2.0. 여러 문장을 한 번에 보낼 수 있습니다
+- 작업자 N개(기본 4) + 대기열 64칸, 넘치면 `503`. Ctrl+C 한 번이면 받은 요청까지 처리하고 종료합니다
+- 테이블별 rwlock은 엔진(`src/db.c`, `src/executor.c`) 안에 있어서 CLI와 서버가 같은 보호를 받습니다
 
 ## 6. 브랜치 전략
 

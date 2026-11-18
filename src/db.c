@@ -127,7 +127,14 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
         db_drop_index(t);
         return st;
     }
-    if (pthread_rwlock_init(&t->lock, NULL) != 0) {
+    // 쓰기 우선 rwlock (PR #5·#6 에서 가져옴). 기본 rwlock 은 SELECT 가 끊이지 않으면
+    // INSERT 가 영원히 못 들어간다. 쓰기 대기자가 있으면 새 읽기를 먼저 막는다.
+    pthread_rwlockattr_t attr;
+    pthread_rwlockattr_init(&attr);
+    pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+    int lock_status = pthread_rwlock_init(&t->lock, &attr);
+    pthread_rwlockattr_destroy(&attr);
+    if (lock_status != 0) {
         fclose(t->fp);
         t->fp = NULL;
         db_drop_index(t);

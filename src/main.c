@@ -1,13 +1,8 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "db.h"
-#include "executor.h"
-#include "server.h"
-#include "statement.h"
-#include "token.h"
 #include "sql.h"
 
 // 테이블 파일을 찾는 곳. 프로그램을 실행한 디렉터리 기준이다.
@@ -112,39 +107,13 @@ static DbStatus run_sql(Db *db, const char *sql, DbError *err)
     }
 }
 
-// --server 모드: DB 를 한 번만 열고, 프로세스가 살아 있는 동안 계속 요청을 받는다.
-// CLI 처럼 요청마다 db_open 하면 매번 데이터 파일 전체를 읽고 B+ 트리를 다시 만든다.
-static int run_server(int argc, char **argv)
-{
-    Db db;
-    DbError err;
-    int port = (argc >= 3) ? atoi(argv[2]) : 8080;
-    int workers = (argc >= 4) ? atoi(argv[3]) : 4;
-
-    if (port <= 0 || port > 65535) {
-        fprintf(stderr, "Error: bad port '%s'\n", argv[2]);
-        return 1;
-    }
-    if (db_open(DATA_DIR, &db, &err) != DB_OK) {
-        fprintf(stderr, "%s\n", err.message);
-        return 1;
-    }
-    int rc = server_run(&db, port, workers);   // 정상이면 돌아오지 않는다 (Ctrl+C 로 끈다)
-    db_close(&db);
-    return rc == 0 ? 0 : 1;
-}
-
 int main(int argc, char **argv)
 {
     Db db;
     DbError err;
 
-    if (argc >= 2 && strcmp(argv[1], "--server") == 0) {
-        return run_server(argc, argv);
-    }
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s <file.sql>\n"
-                        "       %s --server [port] [workers]\n", argv[0], argv[0]);
+        fprintf(stderr, "Usage: %s <file.sql>\n", argv[0]);
         return 1;
     }
     char *sql = read_file(argv[1]);

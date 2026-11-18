@@ -65,6 +65,15 @@ check "RPC errors use HTTP 200"    "$(status -X POST --data-binary '{oops' "$URL
 check "notification -> 204"        "$(status -X POST --data-binary '{"jsonrpc":"2.0","method":"ping"}' "$URL/rpc")" 204
 check "GET /rpc -> 405"            "$(status "$URL/rpc")" 405
 
+# POST /query (PR #4·#6 과 같은 단순 API. 세 PR 통합 때 추가)
+sq() { curl -s --max-time 10 -X POST -H 'Content-Type: application/json' --data-binary "{\"sql\":\"$1\"}" "$URL/query"; }
+sq_status() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST --data-binary "$1" "$URL/query"; }
+check "/query SELECT"               "$(sq 'SELECT name FROM users WHERE id = 1;')" '{"ok":true,"rows":[["Kim"]],"row_count":1}'
+check "/query INSERT"               "$(sq "INSERT INTO users VALUES ('Park', 40);")" '{"ok":true,"inserted_id":3}'
+check "/query two statements -> 400" "$(sq_status '{"sql":"SELECT * FROM users; SELECT * FROM users;"}')" 400
+check "/query no table -> 404"      "$(sq_status '{"sql":"SELECT * FROM nope;"}')" 404
+check "/query bad body -> 400"      "$(sq_status '{oops')" 400
+
 echo "[3단계] 스레드 풀"
 # 요청을 안 보내고 연결만 붙잡는 느린 손님. 반복 서버였다면 5초(TIMEOUT_SEC) 동안 다른 요청이 막힌다.
 exec 4<>"/dev/tcp/127.0.0.1/$PORT"
@@ -75,8 +84,8 @@ exec 4<&-
 JOBS=()
 for i in $(seq 1 40); do query "INSERT INTO users VALUES ('P$i', $i);" > /dev/null & JOBS+=($!); done
 wait "${JOBS[@]}"   # 그냥 wait 하면 서버(백그라운드)까지 기다려 버린다
-check "40 parallel INSERTs all saved" "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":42'
-check "ids are unique (last id 42)"   "$(query 'SELECT id FROM users WHERE id = 42;' | grep -o '"row_count":[0-9]*')" '"row_count":1'
+check "40 parallel INSERTs all saved (3+40)" "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":43'
+check "ids are unique (last id 43)"   "$(query 'SELECT id FROM users WHERE id = 43;' | grep -o '"row_count":[0-9]*')" '"row_count":1'
 
 echo "[4단계] 안전한 종료"
 # 처리 중인 요청은 Ctrl+C 뒤에도 끝까지 응답을 받는다.
@@ -98,7 +107,7 @@ check "Ctrl+C -> exit 0"           "$?" 0
 ./build/dbms-server $PORT "$DATA" >> /tmp/dbms-e2e.log 2>&1 &
 PID=$!
 sleep 0.3
-check "data survives restart"      "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":42'
+check "data survives restart"      "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":43'
 
 # 정리가 오래 걸려도(요청을 덜 보낸 손님) Ctrl+C 를 한 번 더 누르면 바로 끝난다.
 exec 6<>"/dev/tcp/127.0.0.1/$PORT"

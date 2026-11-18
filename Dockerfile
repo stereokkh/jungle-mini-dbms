@@ -7,7 +7,7 @@ FROM gcc:13-bookworm
 # sqlite3: 동작 비교용 실제 DBMS
 RUN apt-get update \
     && apt-get install -y --no-install-recommends make gdb sqlite3 \
-       curl ca-certificates git pkg-config libmicrohttpd-dev libjansson-dev \
+       curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI.

@@ -5,8 +5,9 @@
 //
 //   GET  /health  살아 있는지 확인 (모니터링 도구용 단순 HTTP)
 //   POST /rpc     JSON-RPC 2.0. method "query" 로 SQL 을 실행한다 (rpc.c)
+//   POST /query   {"sql":"..."} 한 문장. PR #4·#6 과 같은 API (세 PR 통합: MERGE.md)
 //
-// 여러 작업자가 같은 DB 를 함께 쓰므로, 테이블마다 rwlock 을 건다 (query.c).
+// 여러 작업자가 같은 DB 를 함께 쓴다. 테이블별 rwlock 은 엔진(src/)이 잡는다.
 
 #include <arpa/inet.h>
 #include <pthread.h>
@@ -20,7 +21,9 @@
 
 #include "db.h"
 #include "http.h"
+#include "json.h"
 #include "pool.h"
+#include "query.h"
 #include "rpc.h"
 
 #define DEFAULT_PORT     8080
@@ -29,7 +32,7 @@
 #define DEFAULT_THREADS  4        // 작업자 스레드 수
 
 // 서버가 쓰는 DB 하나. main 에서 열고, 모든 작업자 스레드가 함께 쓴다.
-// 동시에 써도 되도록 락은 query.c 가 잡는다.
+// 동시에 써도 되도록 락은 엔진(src/db.c, executor.c)이 잡는다.
 static Db g_db;
 
 // Ctrl+C(SIGINT) 를 받으면 1. 시그널 핸들러에서는 이런 플래그만 바꾸는 것이 안전하다.
@@ -94,6 +97,48 @@ static void handle_rpc(int fd, const HttpRequest *req)
     free(json);
 }
 
+// [역할] 본문 {"sql":"..."} 에서 sql 문자열을 꺼낸다.
+// [반환] malloc 한 SQL (부른 쪽이 free). JSON 이 틀렸거나 sql 문자열이 없으면 NULL
+static char *read_sql_field(const char *body, size_t len)
+{
+    JsonReader check = { body, body + len };
+    if (jr_skip_value(&check) != 0 || (jr_skip_ws(&check), check.p != check.end)) return NULL;
+
+    JsonReader r = { body, body + len };
+    if (!jr_eat(&r, '{') || jr_eat(&r, '}')) return NULL;
+    do {
+        char *key, *sql = NULL;
+        if (jr_read_string(&r, &key) != 0) return NULL;
+        jr_eat(&r, ':');
+        jr_skip_ws(&r);
+        int found = strcmp(key, "sql") == 0;
+        free(key);
+        if (found) {
+            if (r.p < r.end && *r.p == '"' && jr_read_string(&r, &sql) == 0) return sql;
+            return NULL;
+        }
+        jr_skip_value(&r);
+    } while (jr_eat(&r, ','));
+    return NULL;
+}
+
+// [역할] POST /query 요청을 처리한다. PR #4·#6 이 쓰던 단순 API 를 이 서버에도 둔다.
+// [순서] 본문에서 sql 꺼내기 (없으면 400) → query_run_one 으로 한 문장 실행 → 상태 코드와 JSON 응답
+static void handle_query(int fd, const HttpRequest *req)
+{
+    char *sql = read_sql_field(req->body, req->content_length);
+    if (sql == NULL) {
+        http_send_json(fd, 400, "{\"ok\":false,\"error\":\"body must be {\\\"sql\\\":\\\"...\\\"}\"}");
+        return;
+    }
+    int status;
+    char *json = query_run_one(&g_db, sql, &status);
+    free(sql);
+    if (json != NULL) http_send_json(fd, status, json);
+    else http_send_error(fd, 500, "out of memory");
+    free(json);
+}
+
 // [역할] 요청의 경로(path)와 메서드(GET/POST)를 보고 알맞은 처리 함수(핸들러)를 부른다.
 // [기능] 경로가 없으면 404, 경로는 있는데 메서드가 틀리면 405 를 보낸다.
 //        새 API 를 추가할 때는 여기에 if 하나를 더한다.
@@ -101,6 +146,11 @@ static void route(int fd, const HttpRequest *req)
 {
     if (strcmp(req->path, "/health") == 0) {
         if (strcmp(req->method, "GET") == 0) handle_health(fd);
+        else http_send_error(fd, 405, "method not allowed");
+        return;
+    }
+    if (strcmp(req->path, "/query") == 0) {
+        if (strcmp(req->method, "POST") == 0) handle_query(fd, req);
         else http_send_error(fd, 405, "method not allowed");
         return;
     }
