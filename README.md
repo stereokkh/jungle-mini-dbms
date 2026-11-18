@@ -46,7 +46,27 @@ make clean
 
 `WHERE id = 정수`는 메모리의 B+ 트리 인덱스로 찾습니다. 구조와 실패 처리, 성능 측정 결과는 [Phase 2 문서](docs/phase2-bplus-tree.md)에 있습니다. 인덱스가 파일과 어긋나지 않도록, 실행 중에는 `data/`의 CSV 파일을 직접 고치지 않습니다.
 
-## 5. 브랜치 전략
+## 5. HTTP API 서버
+
+Docker 개발 이미지를 다시 빌드하면 서버 빌드에 필요한 `libmicrohttpd`, `Jansson`, `pkg-config`가 설치됩니다. macOS에서 직접 빌드하려면 `brew install libmicrohttpd jansson pkgconf`를 실행합니다.
+
+```sh
+make server
+./build/mini-dbms-server          # 127.0.0.1:8080, 기본 데이터 디렉터리는 data
+# ./build/mini-dbms-server /path/to/test-data
+```
+
+다른 터미널에서 다음처럼 요청합니다. Docker로 실행했다면 같은 컨테이너 안에서 `curl`을 실행합니다.
+
+```sh
+curl -i http://127.0.0.1:8080/query \
+  -H 'Content-Type: application/json' \
+  --data '{"sql":"SELECT id, name FROM users WHERE id = 1;"}'
+```
+
+`POST /query`는 최대 16 KiB의 JSON 본문에서 `sql` 문자열 하나를 읽고 SQL 한 문장을 실행합니다. `SELECT`는 `{"rows":[],"row_count":0}` 형태로 행과 개수를, `INSERT`는 `{"inserted_id":1}` 형태로 생성된 ID를 돌려줍니다. 잘못된 입력은 `400`, 본문 크기 초과는 `413`, DB 파일 오류는 `500`으로 응답합니다. 이 버전에서는 요청을 순차 처리합니다.
+
+## 6. 브랜치 전략
 
 | 브랜치 | 용도 |
 | --- | --- |

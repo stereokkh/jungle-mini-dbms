@@ -3,9 +3,7 @@
 #include <stdlib.h>
 
 #include "db.h"
-#include "executor.h"
-#include "statement.h"
-#include "token.h"
+#include "sql.h"
 
 // 테이블 파일을 찾는 곳. 프로그램을 실행한 디렉터리 기준이다.
 #define DATA_DIR "data"
@@ -70,16 +68,12 @@ static void print_row(const Value *fields, int field_count, void *ctx)
 // 토큰으로 만든 문장 하나를 파싱하고 실행해서 결과를 출력한다.
 static DbStatus run_statement(Db *db, const Token *toks, int count, DbError *err)
 {
-    Statement stmt;
+    StmtType type;
     ExecResult result;
-    DbStatus st;
-
-    if ((st = parse(toks, count, &stmt, err)) != DB_OK) return st;
-    st = execute(db, &stmt, print_row, NULL, &result, err);
-    statement_free(&stmt);  // 실행이 실패해도 조건 트리는 해제한다
+    DbStatus st = execute_tokens(db, toks, count, print_row, NULL, &type, &result, err);
     if (st != DB_OK) return st;
 
-    if (stmt.type == STMT_INSERT) {
+    if (type == STMT_INSERT) {
         printf("OK (id=%lld)\n", result.inserted_id);
     } else {
         printf("(%d rows)\n", result.row_count);

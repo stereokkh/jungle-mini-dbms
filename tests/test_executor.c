@@ -6,6 +6,7 @@
 
 #include "db.h"
 #include "executor.h"
+#include "sql.h"
 #include "statement.h"
 #include "token.h"
 
@@ -77,6 +78,31 @@ static void insert_ok(Db *db, const char *sql, long long expected_id)
 
     assert(run(db, sql, NULL, &res, &err) == DB_OK);
     assert(res.inserted_id == expected_id);
+}
+
+static void test_run_one_sql(void)
+{
+    char dir[64];
+    Db db;
+    StmtType type;
+    ExecResult result;
+    DbError err;
+    Rows rows = {0};
+
+    make_db(dir, sizeof dir, &db);
+
+    assert(run_one_sql(&db, "INSERT INTO users VALUES ('skip', 30); SELECT * FROM users;",
+                       NULL, NULL, &type, &result, &err) == DB_ERR_SYNTAX);
+    assert(run_one_sql(&db, "  ", NULL, NULL, &type, &result, &err) == DB_ERR_SYNTAX);
+    assert(run_one_sql(&db, "INSERT INTO users VALUES ('a;b', 20); \t\n",
+                       NULL, NULL, &type, &result, &err) == DB_OK);
+    assert(type == STMT_INSERT && result.inserted_id == 1);
+
+    assert(run_one_sql(&db, "SELECT id, name FROM users", collect, &rows,
+                       &type, &result, &err) == DB_OK);
+    assert(type == STMT_SELECT && result.row_count == 1 && rows.count == 1);
+    assert(rows.rows[0][0].i == 1 && strcmp(rows.rows[0][1].s, "a;b") == 0);
+    remove_db(dir, &db);
 }
 
 static void test_insert_and_select_all(void)
@@ -424,6 +450,7 @@ static void test_id_index(void)
 
 int main(void)
 {
+    test_run_one_sql();
     test_id_index();
     test_insert_and_select_all();
     test_where_and_columns();
