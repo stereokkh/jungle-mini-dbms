@@ -17,7 +17,12 @@ DbStatus storage_append(Table *t, const char *line, long *offset, DbError *err)
         return error_set(err, DB_ERR_IO, -1, "cannot write to table '%s'", t->name);
     }
     long start = ftell(t->fp);
-    if (start < 0 || fputs(line, t->fp) == EOF || fputc('\n', t->fp) == EOF) {
+    if (start < 0) {
+        return error_set(err, DB_ERR_IO, -1, "cannot write to table '%s'", t->name);
+    }
+    // 쓰기 락을 보유한 동안 버퍼를 비워 읽기 경로는 쓰기 스트림에 접근하지 않게 한다.
+    if (fputs(line, t->fp) == EOF || fputc('\n', t->fp) == EOF || fflush(t->fp) == EOF) {
+        t->write_failed = true;
         return error_set(err, DB_ERR_IO, -1, "cannot write to table '%s'", t->name);
     }
     *offset = start;
@@ -170,17 +175,12 @@ static DbStatus scan_lines(FILE *in, const Table *t, ScanCallback cb, void *ctx,
     }
 }
 
-// 읽기 전 준비: 쓰기용 버퍼를 비우고 데이터 파일을 읽기용으로 따로 연다.
+// SELECT 마다 데이터 파일을 읽기용으로 따로 연다.
 // 데이터 파일이 아직 없으면 *in 을 NULL 로 두고 DB_OK 를 돌려준다 (행이 0개인 것이다).
 static DbStatus open_for_read(Db *db, Table *t, FILE **in, DbError *err)
 {
     char path[512];     // data_dir(255) + '/' + name(63) + ".csv" 가 항상 들어가는 크기
 
-    // 쓰기용 버퍼에 남은 줄을 파일로 내려보내야 방금 넣은 줄이 읽힌다.
-    // 테이블을 여는 중(next_id 를 정할 때)에는 아직 fp 가 없다.
-    if (t->fp != NULL && fflush(t->fp) != 0) {
-        return error_set(err, DB_ERR_IO, -1, "cannot write to table '%s'", t->name);
-    }
     snprintf(path, sizeof path, "%s/%s.csv", db->data_dir, t->name);
 
     *in = fopen(path, "rb");

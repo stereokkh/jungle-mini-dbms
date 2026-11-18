@@ -48,7 +48,29 @@ make clean
 
 Phase 3(API 서버)는 [개념 문서](docs/phase3-api-server-concepts.md)로 배경을 익히고, [단계별 개발 설계](docs/phase3-step-design.md)의 선택지와 결정 기록을 따라 진행합니다.
 
-## 5. 브랜치 전략
+## 5. HTTP API 서버
+
+Docker 개발 이미지를 다시 빌드하면 서버 빌드에 필요한 `libmicrohttpd`, `Jansson`, `pkg-config`가 설치됩니다. macOS에서 직접 빌드하려면 `brew install libmicrohttpd jansson pkgconf`를 실행합니다.
+
+```sh
+make server
+./build/mini-dbms-server          # 127.0.0.1:8080, 기본 데이터 디렉터리는 data
+# ./build/mini-dbms-server /path/to/test-data
+```
+
+다른 터미널에서 다음처럼 요청합니다. Docker로 실행했다면 같은 컨테이너 안에서 `curl`을 실행합니다.
+
+```sh
+curl -i http://127.0.0.1:8080/query \
+  -H 'Content-Type: application/json' \
+  --data '{"sql":"SELECT id, name FROM users WHERE id = 1;"}'
+```
+
+`POST /query`는 최대 16 KiB의 JSON 본문에서 `sql` 문자열 하나를 읽고 SQL 한 문장을 실행합니다. `SELECT`는 `{"rows":[],"row_count":0}` 형태로 행과 개수를, `INSERT`는 `{"inserted_id":1}` 형태로 생성된 ID를 돌려줍니다. 잘못된 입력은 `400`, 본문 크기 초과는 `413`, DB 파일 오류는 `500`으로 응답합니다.
+
+HTTP 스레드는 본문을 다 받은 요청을 작업 큐에 넣습니다. SQL 워커 두 개가 같은 큐에서 작업을 꺼내며, 큐에는 최대 네 건이 대기할 수 있습니다. 워커는 큐에 들어온 순서대로 요청을 꺼내고, 응답 순서는 쿼리 실행 시간에 따라 달라질 수 있습니다. 큐가 가득 찼거나 서버가 종료 중이면 새 작업에 `503`을 반환합니다. Ctrl+C로 종료하면 이미 큐에 들어간 요청은 완료될 때까지 처리합니다.
+
+## 6. 브랜치 전략
 
 | 브랜치 | 용도 |
 | --- | --- |

@@ -2,10 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "db.h"
 #include "executor.h"
+#include "sql.h"
 #include "statement.h"
 #include "token.h"
 
@@ -77,6 +79,31 @@ static void insert_ok(Db *db, const char *sql, long long expected_id)
 
     assert(run(db, sql, NULL, &res, &err) == DB_OK);
     assert(res.inserted_id == expected_id);
+}
+
+static void test_run_one_sql(void)
+{
+    char dir[64];
+    Db db;
+    StmtType type;
+    ExecResult result;
+    DbError err;
+    Rows rows = {0};
+
+    make_db(dir, sizeof dir, &db);
+
+    assert(run_one_sql(&db, "INSERT INTO users VALUES ('skip', 30); SELECT * FROM users;",
+                       NULL, NULL, &type, &result, &err) == DB_ERR_SYNTAX);
+    assert(run_one_sql(&db, "  ", NULL, NULL, &type, &result, &err) == DB_ERR_SYNTAX);
+    assert(run_one_sql(&db, "INSERT INTO users VALUES ('a;b', 20); \t\n",
+                       NULL, NULL, &type, &result, &err) == DB_OK);
+    assert(type == STMT_INSERT && result.inserted_id == 1);
+
+    assert(run_one_sql(&db, "SELECT id, name FROM users", collect, &rows,
+                       &type, &result, &err) == DB_OK);
+    assert(type == STMT_SELECT && result.row_count == 1 && rows.count == 1);
+    assert(rows.rows[0][0].i == 1 && strcmp(rows.rows[0][1].s, "a;b") == 0);
+    remove_db(dir, &db);
 }
 
 static void test_insert_and_select_all(void)
@@ -422,8 +449,100 @@ static void test_id_index(void)
     remove_db(dir, &db);
 }
 
+typedef struct {
+    Db *db;
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    int ready;
+    int readers;
+} ConcurrentQueries;
+
+static void wait_for_peer(ConcurrentQueries *queries, int *arrived)
+{
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 5;
+
+    assert(pthread_mutex_lock(&queries->mutex) == 0);
+    (*arrived)++;
+    assert(pthread_cond_broadcast(&queries->changed) == 0);
+    while (*arrived < 2) {
+        assert(pthread_cond_timedwait(&queries->changed, &queries->mutex, &deadline) == 0);
+    }
+    assert(pthread_mutex_unlock(&queries->mutex) == 0);
+}
+
+// 두 콜백이 SELECT 안에 동시에 진입해야 다음 단계로 간다.
+static void wait_for_other_reader(const Value *fields, int count, void *ctx)
+{
+    ConcurrentQueries *queries = ctx;
+    assert(count == 1 && fields[0].i == 1);
+    wait_for_peer(queries, &queries->readers);
+}
+
+static void *run_concurrent_queries(void *arg)
+{
+    ConcurrentQueries *queries = arg;
+    StmtType type;
+    ExecResult result;
+    DbError err;
+    // 테이블이 아직 열리지 않은 상태에서 두 스레드가 첫 쿼리를 시작한다.
+    wait_for_peer(queries, &queries->ready);
+    assert(run_one_sql(queries->db, "SELECT id FROM users WHERE id = 1",
+                       wait_for_other_reader, queries, &type, &result, &err) == DB_OK);
+    assert(result.row_count == 1);
+
+    for (int i = 0; i < 100; i++) {
+        assert(run_one_sql(queries->db, "INSERT INTO users VALUES ('parallel', 20)",
+                           NULL, NULL, &type, &result, &err) == DB_OK);
+        long long id = result.inserted_id;
+        char sql[80];
+        Rows rows;
+        snprintf(sql, sizeof sql, "SELECT id FROM users WHERE id = %lld", id);
+        assert(run(queries->db, sql, &rows, &result, &err) == DB_OK);
+        assert(rows.count == 1 && rows.rows[0][0].i == id);
+    }
+    return NULL;
+}
+
+static void test_concurrent_queries(void)
+{
+    char dir[64];
+    char path[80];
+    Db db;
+    DbError err;
+    pthread_t a, b;
+    ConcurrentQueries queries = {
+        .db = &db,
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER,
+    };
+    make_db(dir, sizeof dir, &db);
+    snprintf(path, sizeof path, "%s/users.csv", dir);
+    FILE *csv = fopen(path, "wb");
+    assert(csv != NULL);
+    assert(fputs("1,\"first\",20\n", csv) != EOF);
+    assert(fclose(csv) == 0);
+    assert(db.table_count == 0);
+
+    assert(pthread_create(&a, NULL, run_concurrent_queries, &queries) == 0);
+    assert(pthread_create(&b, NULL, run_concurrent_queries, &queries) == 0);
+    assert(pthread_join(a, NULL) == 0);
+    assert(pthread_join(b, NULL) == 0);
+    assert(pthread_cond_destroy(&queries.changed) == 0);
+    assert(pthread_mutex_destroy(&queries.mutex) == 0);
+
+    Table *t;
+    assert(db.table_count == 1);
+    assert(db_get_table(&db, "users", &t, &err) == DB_OK);
+    assert(t->index_usable && t->index->count == 201 && t->next_id == 202);
+    remove_db(dir, &db);
+}
+
 int main(void)
 {
+    test_run_one_sql();
+    test_concurrent_queries();
     test_id_index();
     test_insert_and_select_all();
     test_where_and_columns();
