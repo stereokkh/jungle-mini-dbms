@@ -155,16 +155,19 @@ http.c / json.c / pool.c     ← 도구 (HTTP 읽기·쓰기 / JSON 읽기·쓰�
 ## 3. 파일별 기능
 
 ```
-CDH/dbms/
-├── Makefile           빌드·테스트 명령. 엔진은 ../../src (파일 이름을 직접 적음), 데이터는 ../../data
+src/server/             ← 실제 서버 코드 (루트 make server → build/dbms-server)
+├── main.c         서버 본체: DB 열기, 리스닝 소켓, accept 반복, HTTP 라우팅, 시그널
+├── pool.h / .c    스레드 풀: 연결 큐(mutex + cond) + 작업자 스레드 N 개
+├── http.h / .c    HTTP 요청 읽기·파싱, 응답 보내기
+├── rpc.h / .c     JSON-RPC 2.0: 요청 해석, 메서드 분기, 응답·오류 만들기, 오류 코드 정의
+├── query.h / .c   SQL 실행기: SQL → 엔진 실행(락은 엔진이) → 결과 JSON
+└── json.h / .c    JSON 도구: 가변 버퍼에 쓰기, 문자열 읽기, 값 건너뛰기(문법 검사)
+
+CDH/dbms/               ← 학습 문서와 테스트
+├── Makefile           테스트·e2e·벤치 명령. 서버는 ../../src/server, 엔진은 ../../src (파일 이름을 직접 적음)
+├── README.md          이 문서
+├── ROADMAP.md         단계별 계획
 ├── MERGE.md           세 PR(#4·#5·#6)을 어떻게 섞었나
-├── server/
-│   ├── main.c         서버 본체: DB 열기, 리스닝 소켓, accept 반복, HTTP 라우팅, 시그널
-│   ├── pool.h / .c    스레드 풀: 연결 큐(mutex + cond) + 작업자 스레드 N 개
-│   ├── http.h / .c    HTTP 요청 읽기·파싱, 응답 보내기
-│   ├── rpc.h / .c     JSON-RPC 2.0: 요청 해석, 메서드 분기, 응답·오류 만들기, 오류 코드 정의
-│   ├── query.h / .c   SQL 실행기: SQL → 엔진 실행(락은 엔진이) → 결과 JSON
-│   └── json.h / .c    JSON 도구: 가변 버퍼에 쓰기, 문자열 읽기, 값 건너뛰기(문법 검사)
 └── tests/
     ├── test_http.c    http_parse 단위 테스트
     ├── test_query.c   query_run 단위 테스트 (임시 폴더에 테이블을 만들어서) + 스레드 8 개 동시 실행
@@ -180,7 +183,7 @@ CDH/dbms/
 
 ## 4. 핵심 함수
 
-### `server/main.c` — 서버 본체
+### `src/server/main.c` — 서버 본체
 
 | 함수                    | 하는 일                                                                                                                                                                                                                                        |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -193,7 +196,7 @@ CDH/dbms/
 | `handle_query(fd, req)` | `POST /query`. `read_sql_field` 로 본문 `{"sql":"..."}` 에서 SQL 을 꺼내(없으면 400) `query_run_one` 결과를 그 상태 코드로 보낸다 |
 | `handle_rpc(fd, req)` | `POST /rpc`. 본문을 `rpc_handle` 에 넘기고 응답을 HTTP 200 으로 보낸다. 알림이면 204, 메모리 부족이면 500                                                                                                                                                             |
 
-### `server/pool.c` — 스레드 풀
+### `src/server/pool.c` — 스레드 풀
 
 | 함수 | 하는 일 |
 |---|---|
@@ -202,7 +205,7 @@ CDH/dbms/
 | `worker(arg)` | 작업자 본체. 락 → 큐가 빌 동안 `pthread_cond_wait` 로 잠듦 → fd 하나 꺼냄 → **락을 풀고** `handler(fd)`. 종료 중이고 큐가 비면 끝난다 |
 | `pool_stop()` | 종료 플래그 → `pthread_cond_broadcast` 로 모두 깨움 → 남은 일을 마친 작업자들을 `pthread_join` |
 
-### `server/http.c` — HTTP 처리
+### `src/server/http.c` — HTTP 처리
 
 | 함수 | 하는 일 |
 |---|---|
@@ -214,7 +217,7 @@ CDH/dbms/
 | `http_send_error(fd, status, msg)` | `{"ok":false,"error":"..."}` 모양의 HTTP 수준 오류 응답 (404/405/413 등) |
 | `http_reason(status)` | 200 → `"OK"`, 404 → `"Not Found"` 같은 표준 문구 |
 
-### `server/rpc.c` — JSON-RPC 2.0
+### `src/server/rpc.c` — JSON-RPC 2.0
 
 | 함수 | 하는 일 |
 |---|---|
@@ -226,7 +229,7 @@ CDH/dbms/
 | `make_error(id, code, msg, executed)` | `{"jsonrpc":"2.0","error":{"code","message","data"},"id":...}` 를 만든다. SQL 오류면 `data.executed` 를 붙인다 |
 | `add_id_and_close(b, id)` | 요청의 `id` 원문을 그대로 붙인다. 모르면 `null` |
 
-### `server/query.c` — SQL 실행기 (서버 ↔ 엔진 연결)
+### `src/server/query.c` — SQL 실행기 (서버 ↔ 엔진 연결)
 
 | 함수 | 하는 일 |
 |---|---|
@@ -239,7 +242,7 @@ CDH/dbms/
 | `rpc_code_of(st)` | 엔진 오류 코드 → JSON-RPC 오류 코드 (`NO_TABLE`→-32002, `SCHEMA`/`IO`→-32003, 나머지→-32001) |
 | `fail(err, code, msg, executed)` | 실패 정보를 채우고 NULL 을 돌려준다 |
 
-### `server/json.c` — JSON 도구
+### `src/server/json.c` — JSON 도구
 
 | 함수 | 하는 일 |
 |---|---|

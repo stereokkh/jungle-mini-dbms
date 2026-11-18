@@ -50,11 +50,11 @@ Phase 3(API 서버)는 [개념 문서](docs/phase3-api-server-concepts.md)로 �
 
 ## 5. HTTP API 서버
 
-Phase 3 서버는 세 PR(#4·#5·#6)을 하나로 합친 것입니다. 무엇을 어디서 가져왔는지는 [CDH/dbms/MERGE.md](CDH/dbms/MERGE.md)에, 서버 설명은 [CDH/dbms/README.md](CDH/dbms/README.md)에 있습니다. 외부 라이브러리는 쓰지 않습니다.
+Phase 3 서버는 세 PR(#4·#5·#6)을 하나로 합친 것입니다. 무엇을 어디서 가져왔는지는 [CDH/dbms/MERGE.md](CDH/dbms/MERGE.md)에, 서버 코드는 `src/server/`, 서버 설명·테스트는 [CDH/dbms/](CDH/dbms/README.md)에 있습니다. 외부 라이브러리는 쓰지 않습니다.
 
 ```sh
-make server                                     # = make -C CDH/dbms → CDH/dbms/build/dbms-server
-./CDH/dbms/build/dbms-server 8080 data 4        # 포트, 데이터 폴더, 작업자 수
+make server                          # src/server/ + 엔진 → build/dbms-server
+./build/dbms-server 8080 data 4      # 포트, 데이터 폴더, 작업자 수
 ```
 
 ```sh

@@ -1,7 +1,7 @@
 # Mini DBMS build
 #
 #   make             build/mini-dbms
-#   make server      Phase 3 API 서버 (CDH/dbms 의 Makefile 로 빌드 → CDH/dbms/build/dbms-server)
+#   make server      build/dbms-server (Phase 3 API 서버, 소스는 src/server/)
 #   make test        tests/test_*.c 를 각각 빌드해서 실행
 #   make asan        AddressSanitizer/UBSan 빌드로 make test 실행
 #   make clean
@@ -36,9 +36,15 @@ $(BUILD):
 $(BIN): $(SRCS) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -pthread -o $@ $(SRCS) $(LDFLAGS)
 
-# 세 PR(#4·#5·#6)을 합치면서 서버는 CDH/dbms 하나로 모았다 (CDH/dbms/MERGE.md)
-server:
-	$(MAKE) -C CDH/dbms
+# API 서버: src/server/*.c + 엔진(main.c 뺀 src/*.c). 테스트·학습 문서는 CDH/dbms/
+SERVER_BIN  := $(BUILD)/dbms-server
+SERVER_SRCS := $(wildcard src/server/*.c)
+SERVER_HDRS := $(wildcard src/server/*.h)
+
+server: $(SERVER_BIN)
+
+$(SERVER_BIN): $(SERVER_SRCS) $(SERVER_HDRS) $(LIB_SRCS) $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -Isrc/server -pthread -o $@ $(SERVER_SRCS) $(LIB_SRCS) $(LDFLAGS)
 
 # 단위 테스트: 테스트 파일 + main.c 를 뺀 모든 소스
 $(BUILD)/test_%: tests/test_%.c $(LIB_SRCS) $(HDRS) | $(BUILD)

@@ -1,13 +1,16 @@
 # 세 PR 통합 기록 (#4 · #5 · #6)
 
+> 통합 뒤 서버 코드는 `CDH/dbms/server/` 에서 **`src/server/`** 로 옮겼다. 이 폴더(`CDH/dbms/`)에는 학습 문서와 테스트만 남는다.
+> 빌드: 루트에서 `make server` → `build/dbms-server`. 테스트: `cd CDH/dbms && make test e2e`.
+
 Phase 3 API 서버를 세 사람이 각자 만들었다. 셋을 그대로 다 넣으면 같은 일을 하는 서버가 3개가 된다.
 그래서 **PR마다 가장 좋은 부분만 골라서 서버 하나로 합쳤다.**
 
-| PR | 작성자 | 브랜치 | 한 줄 요약 |
-|---|---|---|---|
-| #4 | 1224kang | `feat/phase3-api-server` | 루트 `server/` (libmicrohttpd + jansson). **엔진 안에 테이블 락**을 넣음 |
-| #5 | CDH | `CDH/mini-dbms` | `CDH/dbms/` 독립 서버 (직접 만든 HTTP·JSON-RPC, 스레드 풀, 안전한 종료) |
-| #6 | stereokkh | `feat/kunho-server` | `src/` 안의 `--server` 모드 (직접 만든 HTTP·JSON). DB 전체에 rwlock 하나 |
+| PR  | 작성자       | 브랜치                      | 한 줄 요약                                                      |
+| --- | --------- | ------------------------ | ----------------------------------------------------------- |
+| #4  | 1224kang  | `feat/phase3-api-server` | 루트 `server/` (libmicrohttpd + jansson). **엔진 안에 테이블 락**을 넣음 |
+| #5  | CDH       | `CDH/mini-dbms`          | `CDH/dbms/` 독립 서버 (직접 만든 HTTP·JSON-RPC, 스레드 풀, 안전한 종료)      |
+| #6  | stereokkh | `feat/kunho-server`      | `src/` 안의 `--server` 모드 (직접 만든 HTTP·JSON). DB 전체에 rwlock 하나 |
 
 ## 1. 무엇을 어디서 가져왔나
 
@@ -17,12 +20,12 @@ Phase 3 API 서버를 세 사람이 각자 만들었다. 셋을 그대로 다 �
 | INSERT 직후 `fflush`, 쓰기 실패 후 테이블 잠금(`write_failed`) | **#4** | 응답 전에 데이터가 커널로 내려가고, 반쯤 쓴 파일을 계속 쓰지 않는다 | `src/storage.c` |
 | `run_one_sql` (빈 요청·두 문장 이상 거절) | **#4** | `/query` 의 "요청 하나 = 문장 하나" 규칙을 그대로 쓴다 | `src/sql.c` |
 | 엔진 단위 테스트 `test_executor`, `make asan` | **#4** | 엔진 락을 검사한다 | `tests/test_executor.c`, `Makefile` |
-| 서버 본체: 작업자 N개 + 큐 64칸 + 503 | **#5** | 작업자 수를 바꿀 수 있고 벤치로 측정돼 있다 (#4는 2개 고정, 큐 4칸) | `CDH/dbms/server/pool.c`, `main.c` |
-| 안전한 종료 (받은 요청까지 처리, 두 번째 Ctrl+C면 강제 종료) | **#5** | #6에는 없다 | `CDH/dbms/server/main.c` |
-| JSON-RPC `/rpc` (여러 문장), e2e·벤치 | **#5** | 기존 기능을 유지한다 | `CDH/dbms/server/rpc.c`, `tests/` |
+| 서버 본체: 작업자 N개 + 큐 64칸 + 503 | **#5** | 작업자 수를 바꿀 수 있고 벤치로 측정돼 있다 (#4는 2개 고정, 큐 4칸) | `src/server/pool.c`, `main.c` |
+| 안전한 종료 (받은 요청까지 처리, 두 번째 Ctrl+C면 강제 종료) | **#5** | #6에는 없다 | `src/server/main.c` |
+| JSON-RPC `/rpc` (여러 문장), e2e·벤치 | **#5** | 기존 기능을 유지한다 | `src/server/rpc.c`, `tests/` |
 | 쓰기 우선 rwlock | **#5·#6** | 기본 rwlock은 SELECT가 끊이지 않으면 INSERT가 영원히 못 들어간다. #4 엔진 락에 이 속성을 더했다 | `src/db.c` `open_table` |
-| `POST /query` `{"sql"}` API | **#4·#6** 공통 | 팀 둘이 이미 같은 형식을 쓴다. #5 서버에 추가했다 | `CDH/dbms/server/main.c` `handle_query` |
-| `/query` 응답 모양 `{"ok":true,...}`, 오류 → 400/404/500 | **#6** | #4 모양에 `ok`가 더해진 것이라 둘 다 읽기 쉽다 | `CDH/dbms/server/query.c` `query_run_one` |
+| `POST /query` `{"sql"}` API | **#4·#6** 공통 | 팀 둘이 이미 같은 형식을 쓴다. #5 서버에 추가했다 | `src/server/main.c` `handle_query` |
+| `/query` 응답 모양 `{"ok":true,...}`, 오류 → 400/404/500 | **#6** | #4 모양에 `ok`가 더해진 것이라 둘 다 읽기 쉽다 | `src/server/query.c` `query_run_one` |
 | 스레드 풀 테스트, JSON 테스트 | **#6** | 이 서버의 `pool.c`·`json.c` API로 옮겼다 | `CDH/dbms/tests/test_pool.c`, `test_json.c` |
 | 설계 문서 | **#6** | 원안 그대로 참고용으로 둔다 | `docs/phase3-design.md` |
 
@@ -74,7 +77,7 @@ CDH/mini-dbms
 | `CDH/dbms` `make test` (http, query, rpc, json, pool) | 통과 |
 | 같은 단위 테스트를 ThreadSanitizer로 (8 스레드 동시 INSERT/SELECT 포함) | 경고 0개 |
 | `CDH/dbms` `make e2e` (31개: /rpc, /query, 동시 INSERT 40개, 안전한 종료, 재시작 후 데이터) | 전부 통과 |
-| 루트 `make server` | `CDH/dbms/build/dbms-server` 생성 |
+| 루트 `make server` (서버 코드를 `src/server/` 로 옮긴 뒤) | `build/dbms-server` 생성 |
 
 ## 6. 남은 일
 
