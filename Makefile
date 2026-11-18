@@ -39,7 +39,7 @@ $(BUILD):
 	mkdir -p $@
 
 $(BIN): $(SRCS) $(HDRS) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -pthread -o $@ $(SRCS) $(LDFLAGS)
 
 server: $(SERVER_BIN)
 
@@ -49,7 +49,7 @@ $(SERVER_BIN): $(SERVER_SRCS) $(SERVER_HDRS) $(LIB_SRCS) $(HDRS) | $(BUILD)
 
 # 단위 테스트: 테스트 파일 + main.c 를 뺀 모든 소스
 $(BUILD)/test_%: tests/test_%.c $(LIB_SRCS) $(HDRS) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB_SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -pthread -o $@ $< $(LIB_SRCS) $(LDFLAGS)
 
 test: $(TESTS)
 	@set -e; for t in $(TESTS); do echo "== $$t"; $$t; done

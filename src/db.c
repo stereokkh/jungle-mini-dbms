@@ -14,6 +14,9 @@ DbStatus db_open(const char *data_dir, Db *db, DbError *err)
     }
     strcpy(db->data_dir, data_dir);
     db->table_count = 0;
+    if (pthread_mutex_init(&db->tables_mutex, NULL) != 0) {
+        return error_set(err, DB_ERR_IO, -1, "cannot initialize table registry lock");
+    }
     return DB_OK;
 }
 
@@ -94,7 +97,7 @@ static DbStatus load_table(Db *db, Table *t, DbError *err)
 }
 
 // 빈 칸 t 에 테이블을 연다: 스키마 읽기 → 빈 인덱스 만들기 → load_table.
-// 파일을 맨 마지막에 열어서, 중간에 실패하면 인덱스만 해제하면 된다.
+// 호출자가 목록의 mutex 를 잡고 있으며, 초기화를 마친 뒤에만 t 를 목록에 공개한다.
 static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
 {
     char path[512];     // data_dir(255) + '/' + name(63) + ".schema" 가 항상 들어가는 크기
@@ -102,6 +105,7 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
 
     strcpy(t->name, name);  // 길이는 db_get_table 이 이미 검사했다
     t->fp = NULL;
+    t->write_failed = false;
     t->index = NULL;
     t->index_usable = 0;
 
@@ -121,11 +125,19 @@ static DbStatus open_table(Db *db, const char *name, Table *t, DbError *err)
     st = load_table(db, t, err);
     if (st != DB_OK) {
         db_drop_index(t);
+        return st;
     }
-    return st;
+    if (pthread_rwlock_init(&t->lock, NULL) != 0) {
+        fclose(t->fp);
+        t->fp = NULL;
+        db_drop_index(t);
+        return error_set(err, DB_ERR_IO, -1, "cannot initialize lock for table '%s'", name);
+    }
+    return DB_OK;
 }
 
-DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)
+// 호출자가 tables_mutex 를 잡은 상태에서 조회부터 등록까지 끝낸다.
+static DbStatus get_or_open_table(Db *db, const char *name, Table **out, DbError *err)
 {
     int max_tables = (int)(sizeof db->tables / sizeof db->tables[0]);
 
@@ -134,10 +146,6 @@ DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)
             *out = &db->tables[i];
             return DB_OK;
         }
-    }
-    if (strlen(name) >= sizeof db->tables[0].name) {
-        return error_set(err, DB_ERR_TOO_LONG, -1, "table name is too long (limit is %d)",
-                         (int)sizeof db->tables[0].name - 1);
     }
     if (db->table_count >= max_tables) {
         return error_set(err, DB_ERR_TOO_LONG, -1, "too many open tables (limit is %d)", max_tables);
@@ -154,12 +162,29 @@ DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)
     return DB_OK;
 }
 
+DbStatus db_get_table(Db *db, const char *name, Table **out, DbError *err)
+{
+    if (strlen(name) >= sizeof db->tables[0].name) {
+        return error_set(err, DB_ERR_TOO_LONG, -1, "table name is too long (limit is %d)",
+                         (int)sizeof db->tables[0].name - 1);
+    }
+    if (pthread_mutex_lock(&db->tables_mutex) != 0) {
+        return error_set(err, DB_ERR_IO, -1, "cannot lock table registry");
+    }
+
+    DbStatus st = get_or_open_table(db, name, out, err);
+    pthread_mutex_unlock(&db->tables_mutex);
+    return st;
+}
+
 void db_close(Db *db)
 {
     for (int i = 0; i < db->table_count; i++) {
         fclose(db->tables[i].fp);
         db->tables[i].fp = NULL;
         db_drop_index(&db->tables[i]);
+        pthread_rwlock_destroy(&db->tables[i].lock);
     }
     db->table_count = 0;
+    pthread_mutex_destroy(&db->tables_mutex);
 }

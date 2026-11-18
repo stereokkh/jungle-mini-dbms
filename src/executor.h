@@ -12,6 +12,7 @@ typedef struct {
 } ExecResult;
 
 // SELECT 가 찾은 행 하나마다 불린다. CLI 는 여기서 출력하고, Phase 3 서버는 여기서 JSON 을 만든다.
+// 테이블의 읽기 락을 잡은 상태이므로 콜백에서 같은 테이블의 쿼리를 다시 실행하지 않는다.
 typedef void (*RowCallback)(const Value *fields, int field_count, void *ctx);
 
 // 스키마 검사 후 INSERT 는 id 를 붙여 저장, SELECT 는 찾은 행을 콜백으로 전달
