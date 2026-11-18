@@ -1,10 +1,10 @@
-// mini-dbms API 서버 (2단계: SQL API)
+// mini-dbms API 서버 (2단계: JSON-RPC SQL API)
 //
 //   socket → bind → listen → [accept → 요청 읽기 → 라우팅 → 응답 → close] 반복
 //
 // 지금은 요청을 하나씩 차례로 처리하는 "반복 서버" 다.
-//   GET  /health  살아 있는지 확인
-//   POST /query   본문의 SQL 을 엔진으로 실행하고 결과를 JSON 으로 돌려준다
+//   GET  /health  살아 있는지 확인 (모니터링 도구용 단순 HTTP)
+//   POST /rpc     JSON-RPC 2.0. method "query" 로 SQL 을 실행한다 (rpc.c)
 // 3단계에서 스레드 풀로 바꾼다.
 
 #include <arpa/inet.h>
@@ -18,7 +18,7 @@
 
 #include "db.h"
 #include "http.h"
-#include "query.h"
+#include "rpc.h"
 
 #define DEFAULT_PORT     8080
 #define DEFAULT_DATA_DIR "data"   // 테이블 파일(.schema, .csv)이 있는 폴더
@@ -71,33 +71,20 @@ static void handle_health(int fd)
     http_send_json(fd, 200, "{\"ok\":true,\"status\":\"up\"}");
 }
 
-// [역할] POST /query 요청을 처리한다. 본문의 SQL 을 실행하고 결과 JSON 을 보낸다.
-// [순서] 본문을 '\0' 으로 끝나는 문자열로 복사 → query_run 으로 실행 → 결과 JSON 응답
-// [기능] 본문이 비었으면 400. 결과 상태 코드(200/400/404/500)는 query_run 이 정한다.
-static void handle_query(int fd, const HttpRequest *req)
+// [역할] POST /rpc 요청을 처리한다. 본문의 JSON-RPC 요청을 실행하고 JSON-RPC 응답을 보낸다.
+// [순서] rpc_handle 에 본문을 넘긴다 → 응답 JSON 을 HTTP 200 으로 보낸다
+// [기능] JSON-RPC 는 성공·실패를 본문의 result / error 로 구분하므로 HTTP 상태는 항상 200 이다.
+//        알림(id 없는 요청)이면 보낼 응답이 없으므로 204(No Content).
+//        메모리가 모자라 응답을 못 만들었을 때만 HTTP 500.
+static void handle_rpc(int fd, const HttpRequest *req)
 {
-    if (req->content_length == 0) {
-        http_send_error(fd, 400, "request body must contain SQL");
-        return;
-    }
+    int notification = 0;
+    char *json = rpc_handle(&g_db, req->body, req->content_length, &notification);
 
-    // req->body 는 받기 버퍼 안을 가리키고 끝에 다른 바이트가 붙어 있을 수 있다.
-    // 정확히 Content-Length 만큼만 잘라 '\0' 을 붙인 사본을 엔진에 넘긴다.
-    char *sql = malloc(req->content_length + 1);
-    if (sql == NULL) {
-        http_send_error(fd, 500, "out of memory");
-        return;
-    }
-    memcpy(sql, req->body, req->content_length);
-    sql[req->content_length] = '\0';
-
-    int status = 500;
-    char *json = query_run(&g_db, sql, &status);
-    if (json != NULL) http_send_json(fd, status, json);
+    if (json != NULL) http_send_json(fd, 200, json);
+    else if (notification) http_send_json(fd, 204, "");
     else http_send_error(fd, 500, "out of memory");
-
     free(json);
-    free(sql);
 }
 
 // [역할] 요청의 경로(path)와 메서드(GET/POST)를 보고 알맞은 처리 함수(핸들러)를 부른다.
@@ -110,8 +97,8 @@ static void route(int fd, const HttpRequest *req)
         else http_send_error(fd, 405, "method not allowed");
         return;
     }
-    if (strcmp(req->path, "/query") == 0) {
-        if (strcmp(req->method, "POST") == 0) handle_query(fd, req);
+    if (strcmp(req->path, "/rpc") == 0) {
+        if (strcmp(req->method, "POST") == 0) handle_rpc(fd, req);
         else http_send_error(fd, 405, "method not allowed");
         return;
     }

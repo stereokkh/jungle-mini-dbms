@@ -1,4 +1,4 @@
-// SQL API(query_run) 단위 테스트. 임시 폴더에 users 테이블을 만들고 HTTP 없이 바로 부른다.
+// SQL 실행기(query_run) 단위 테스트. 임시 폴더에 users 테이블을 만들고 HTTP 없이 바로 부른다.
 
 #include <assert.h>
 #include <stdio.h>
@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "query.h"
+#include "rpc.h"
 
 static Db db;
 static char dir[64];
@@ -36,68 +37,65 @@ static void teardown(void)
     assert(system(cmd) == 0);
 }
 
-// [역할] sql 을 실행해 상태 코드와 JSON 을 비교한다.
-static void expect(const char *sql, int status, const char *json)
+// [역할] sql 이 성공하고 결과 JSON 이 json 과 같은지 확인한다.
+static void expect_ok(const char *sql, const char *json)
 {
-    int st = 0;
-    char *out = query_run(&db, sql, &st);
-    assert(out != NULL);
-    if (st != status || strcmp(out, json) != 0) {
-        fprintf(stderr, "SQL:  %s\nGOT:  %d %s\nWANT: %d %s\n", sql, st, out, status, json);
+    QueryError qe;
+    char *out = query_run(&db, sql, &qe);
+    if (out == NULL || strcmp(out, json) != 0) {
+        fprintf(stderr, "SQL:  %s\nGOT:  %s\nWANT: %s\n", sql, out ? out : qe.message, json);
         abort();
     }
     free(out);
 }
 
+// [역할] sql 이 실패하고 오류 코드·실행된 문장 수가 기대와 같은지 확인한다.
+static void expect_fail(const char *sql, int code, int executed)
+{
+    QueryError qe;
+    char *out = query_run(&db, sql, &qe);
+    if (out != NULL || qe.code != code || qe.executed != executed) {
+        fprintf(stderr, "SQL: %s\nGOT: %s code=%d executed=%d\n", sql, out ? out : "(fail)",
+                qe.code, qe.executed);
+        abort();
+    }
+}
+
 // INSERT 는 id 를 붙여 주고, SELECT 는 컬럼 이름과 행을 돌려준다
 static void test_insert_and_select(void)
 {
-    expect("INSERT INTO users VALUES ('Kim', 20);", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"insert\",\"id\":1}]}");
-    expect("INSERT INTO users VALUES ('Lee', 30); INSERT INTO users VALUES ('Park', 40);", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"insert\",\"id\":2},{\"type\":\"insert\",\"id\":3}]}");
-    expect("SELECT * FROM users WHERE id = 2;", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"select\",\"rows\":[[2,\"Lee\",30]],"
-           "\"columns\":[\"id\",\"name\",\"age\"],\"row_count\":1}]}");
-    expect("SELECT name FROM users WHERE age > 25", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"select\",\"rows\":[[\"Lee\"],[\"Park\"]],"
-           "\"columns\":[\"name\"],\"row_count\":2}]}");
-    expect("SELECT * FROM users WHERE id = 999;", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"select\",\"rows\":[],"
-           "\"columns\":[\"id\",\"name\",\"age\"],\"row_count\":0}]}");
+    expect_ok("INSERT INTO users VALUES ('Kim', 20);",
+              "{\"results\":[{\"type\":\"insert\",\"id\":1}]}");
+    expect_ok("INSERT INTO users VALUES ('Lee', 30); INSERT INTO users VALUES ('Park', 40);",
+              "{\"results\":[{\"type\":\"insert\",\"id\":2},{\"type\":\"insert\",\"id\":3}]}");
+    expect_ok("SELECT * FROM users WHERE id = 2;",
+              "{\"results\":[{\"type\":\"select\",\"rows\":[[2,\"Lee\",30]],"
+              "\"columns\":[\"id\",\"name\",\"age\"],\"row_count\":1}]}");
+    expect_ok("SELECT name FROM users WHERE age > 25",
+              "{\"results\":[{\"type\":\"select\",\"rows\":[[\"Lee\"],[\"Park\"]],"
+              "\"columns\":[\"name\"],\"row_count\":2}]}");
+    expect_ok("SELECT * FROM users WHERE id = 999;",
+              "{\"results\":[{\"type\":\"select\",\"rows\":[],"
+              "\"columns\":[\"id\",\"name\",\"age\"],\"row_count\":0}]}");
 }
 
 // 문자열 안의 " 와 \ 는 JSON 에서 이스케이프된다
 static void test_json_escape(void)
 {
-    expect("INSERT INTO users VALUES ('say \"hi\" \\', 1);", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"insert\",\"id\":4}]}");
-    expect("SELECT name FROM users WHERE id = 4;", 200,
-           "{\"ok\":true,\"results\":[{\"type\":\"select\",\"rows\":[[\"say \\\"hi\\\" \\\\\"]],"
-           "\"columns\":[\"name\"],\"row_count\":1}]}");
+    expect_ok("INSERT INTO users VALUES ('say \"hi\" \\', 1);",
+              "{\"results\":[{\"type\":\"insert\",\"id\":4}]}");
+    expect_ok("SELECT name FROM users WHERE id = 4;",
+              "{\"results\":[{\"type\":\"select\",\"rows\":[[\"say \\\"hi\\\" \\\\\"]],"
+              "\"columns\":[\"name\"],\"row_count\":1}]}");
 }
 
-// 엔진 오류는 HTTP 상태 코드로 바뀐다. executed = 오류 전에 실행된 문장 수
+// 엔진 오류는 JSON-RPC 오류 코드로 바뀐다. executed = 오류 전에 실행된 문장 수
 static void test_errors(void)
 {
-    int st;
-    char *out;
-
-    out = query_run(&db, "SELEC * FROM users;", &st);
-    assert(st == 400 && strstr(out, "\"ok\":false") && strstr(out, "\"executed\":0"));
-    free(out);
-
-    out = query_run(&db, "SELECT * FROM nope;", &st);
-    assert(st == 404);
-    free(out);
-
-    out = query_run(&db, "INSERT INTO users VALUES ('Choi', 50); SELECT bad FROM users;", &st);
-    assert(st == 400 && strstr(out, "\"executed\":1"));   // 첫 INSERT 는 이미 반영됨
-    free(out);
-
-    out = query_run(&db, "  ;  ", &st);
-    assert(st == 400 && strstr(out, "no SQL statement"));
-    free(out);
+    expect_fail("SELEC * FROM users;", RPC_SQL_ERROR, 0);
+    expect_fail("SELECT * FROM nope;", RPC_TABLE_NOT_FOUND, 0);
+    expect_fail("INSERT INTO users VALUES ('Choi', 50); SELECT bad FROM users;", RPC_SQL_ERROR, 1);
+    expect_fail("  ;  ", RPC_INVALID_PARAMS, 0);
 }
 
 // [역할] 테스트 함수를 차례로 실행한다. assert 하나라도 실패하면 멈춘다.

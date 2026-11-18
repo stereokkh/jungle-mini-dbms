@@ -1,7 +1,7 @@
 # mini-dbms API 서버 (CDH)
 #
 #   make          build/dbms-server
-#   make test     단위 테스트 (HTTP 파서, SQL API)
+#   make test     단위 테스트 (HTTP 파서, SQL 실행기, JSON-RPC)
 #   make e2e      서버를 띄우고 curl 로 기능 테스트
 #   make run      서버 실행 (PORT=8080, 데이터는 저장소 루트의 data/)
 #
@@ -14,7 +14,7 @@ PORT    ?= 8080
 DATA    ?= ../../data
 
 ENGINE_SRCS := $(filter-out $(ENGINE)/main.c,$(wildcard $(ENGINE)/*.c))
-SERVER_SRCS := server/http.c server/query.c
+SERVER_SRCS := server/http.c server/json.c server/query.c server/rpc.c
 HEADERS     := $(wildcard server/*.h) $(wildcard $(ENGINE)/*.h)
 
 .PHONY: all test e2e run clean
@@ -29,9 +29,10 @@ build/test_%: tests/test_%.c $(SERVER_SRCS) $(ENGINE_SRCS) $(HEADERS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $< $(SERVER_SRCS) $(ENGINE_SRCS)
 
-test: build/test_http build/test_query
+test: build/test_http build/test_query build/test_rpc
 	./build/test_http
 	./build/test_query
+	./build/test_rpc
 
 e2e: build/dbms-server
 	bash tests/e2e.sh
