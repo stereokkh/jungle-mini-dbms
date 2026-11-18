@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# 서버를 실제로 띄우고 curl 로 확인하는 기능 테스트.   사용법: make e2e
+set -u
+
+PORT=18080
+URL="http://127.0.0.1:$PORT"
+FAIL=0
+
+# 테스트 전용 데이터 폴더 (진짜 data/ 를 건드리지 않는다)
+DATA=$(mktemp -d /tmp/dbms-e2e-XXXXXX)
+printf 'id,INT\nname,TEXT\nage,INT\n' > "$DATA/users.schema"
+
+# [역할] 실제 값과 기대 값을 비교해 PASS/FAIL 을 찍는다.
+check() {
+    if [[ "$2" == "$3" ]]; then echo "  PASS $1"; else echo "  FAIL $1: got [$2], expected [$3]"; FAIL=1; fi
+}
+
+# [역할] 상태 코드만 가져온다.
+status() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"; }
+
+# [역할] JSON-RPC 요청 본문을 POST /rpc 로 보내고 응답 본문을 출력한다.
+rpc() { curl -s --max-time 10 -X POST -H 'Content-Type: application/json' --data-binary "$1" "$URL/rpc"; }
+
+# [역할] SQL 하나를 method "query" 로 감싸 보낸다. (SQL 안에 " 가 없다고 가정한 테스트용)
+query() { rpc "{\"jsonrpc\":\"2.0\",\"method\":\"query\",\"params\":{\"sql\":\"$1\"},\"id\":1}"; }
+
+# [역할] curl 이 못 만드는 날것의 요청을 TCP 로 보내고 상태 코드만 뽑는다.
+raw_status() {
+    exec 3<>"/dev/tcp/127.0.0.1/$PORT"
+    printf '%b' "$1" >&3
+    timeout 10 cat <&3 | head -1 | awk '{print $2}'
+    exec 3<&-
+}
+
+./build/dbms-server $PORT "$DATA" > /tmp/dbms-e2e.log 2>&1 &
+PID=$!
+sleep 0.3
+
+echo "[1단계] 베이스 서버"
+check "GET /health -> 200"        "$(status "$URL/health")" 200
+check "body has status up"         "$(curl -s "$URL/health")" '{"ok":true,"status":"up"}'
+check "unknown path -> 404"        "$(status "$URL/nope")" 404
+check "POST /health -> 405"        "$(status -X POST "$URL/health")" 405
+check "garbage -> 400"             "$(raw_status 'HELLO\r\n\r\n')" 400
+check "huge Content-Length -> 413" "$(raw_status 'POST /health HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n')" 413
+
+# 응답을 안 읽고 끊는 클라이언트가 있어도 서버는 살아 있어야 한다 (SIGPIPE)
+(exec 3<>"/dev/tcp/127.0.0.1/$PORT"; printf 'GET /health HTTP/1.1\r\n\r\n' >&3; exec 3<&-)
+check "alive after abrupt client"  "$(status "$URL/health")" 200
+
+echo "[2단계] JSON-RPC SQL API"
+check "ping"                       "$(rpc '{"jsonrpc":"2.0","method":"ping","id":1}')" \
+      '{"jsonrpc":"2.0","result":"pong","id":1}'
+check "INSERT"                     "$(query "INSERT INTO users VALUES ('Kim', 20);")" \
+      '{"jsonrpc":"2.0","result":{"results":[{"type":"insert","id":1}]},"id":1}'
+query "INSERT INTO users VALUES ('Lee', 30);" > /dev/null
+check "SELECT by id (index)"       "$(query "SELECT * FROM users WHERE id = 2;")" \
+      '{"jsonrpc":"2.0","result":{"results":[{"type":"select","rows":[[2,"Lee",30]],"columns":["id","name","age"],"row_count":1}]},"id":1}'
+check "data written to file"       "$(cat "$DATA/users.csv" | wc -l)" 2
+check "SQL error code -32001"      "$(query 'SELEC 1' | grep -o '"code":-32001')" '"code":-32001'
+check "no table code -32002"       "$(query 'SELECT * FROM nope;' | grep -o '"code":-32002')" '"code":-32002'
+check "bad JSON code -32700"       "$(rpc '{oops' | grep -o '"code":-32700')" '"code":-32700'
+check "unknown method -32601"      "$(rpc '{"jsonrpc":"2.0","method":"x","id":1}' | grep -o '"code":-32601')" '"code":-32601'
+check "RPC errors use HTTP 200"    "$(status -X POST --data-binary '{oops' "$URL/rpc")" 200
+check "notification -> 204"        "$(status -X POST --data-binary '{"jsonrpc":"2.0","method":"ping"}' "$URL/rpc")" 204
+check "GET /rpc -> 405"            "$(status "$URL/rpc")" 405
+
+# POST /query (PR #4·#6 과 같은 단순 API. 세 PR 통합 때 추가)
+sq() { curl -s --max-time 10 -X POST -H 'Content-Type: application/json' --data-binary "{\"sql\":\"$1\"}" "$URL/query"; }
+sq_status() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST --data-binary "$1" "$URL/query"; }
+check "/query SELECT"               "$(sq 'SELECT name FROM users WHERE id = 1;')" '{"ok":true,"rows":[["Kim"]],"row_count":1}'
+check "/query INSERT"               "$(sq "INSERT INTO users VALUES ('Park', 40);")" '{"ok":true,"inserted_id":3}'
+check "/query two statements -> 400" "$(sq_status '{"sql":"SELECT * FROM users; SELECT * FROM users;"}')" 400
+check "/query no table -> 404"      "$(sq_status '{"sql":"SELECT * FROM nope;"}')" 404
+check "/query bad body -> 400"      "$(sq_status '{oops')" 400
+
+echo "[3단계] 스레드 풀"
+# 요청을 안 보내고 연결만 붙잡는 느린 손님. 반복 서버였다면 5초(TIMEOUT_SEC) 동안 다른 요청이 막힌다.
+exec 4<>"/dev/tcp/127.0.0.1/$PORT"
+check "slow client does not block" "$(status --max-time 2 "$URL/health")" 200
+exec 4<&-
+
+# 40 개 INSERT 를 동시에 보낸다. 하나도 빠지지 않고 id 도 겹치지 않아야 한다.
+JOBS=()
+for i in $(seq 1 40); do query "INSERT INTO users VALUES ('P$i', $i);" > /dev/null & JOBS+=($!); done
+wait "${JOBS[@]}"   # 그냥 wait 하면 서버(백그라운드)까지 기다려 버린다
+check "40 parallel INSERTs all saved (3+40)" "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":43'
+check "ids are unique (last id 43)"   "$(query 'SELECT id FROM users WHERE id = 43;' | grep -o '"row_count":[0-9]*')" '"row_count":1'
+
+echo "[4단계] 안전한 종료"
+# 처리 중인 요청은 Ctrl+C 뒤에도 끝까지 응답을 받는다.
+# 헤더만 먼저 보내 작업자가 본문을 기다리게 한 상태에서 Ctrl+C → 그다음 본문을 보낸다.
+PING='{"jsonrpc":"2.0","method":"ping","id":1}'   # 40 바이트
+exec 5<>"/dev/tcp/127.0.0.1/$PORT"
+printf 'POST /rpc HTTP/1.1\r\nContent-Length: %d\r\n\r\n' "${#PING}" >&5
+sleep 0.3
+kill -INT $PID
+sleep 0.3
+check "new connection refused while stopping" "$(status --max-time 2 "$URL/health")" 000
+printf '%s' "$PING" >&5
+check "in-flight request finished"  "$(timeout 5 head -1 <&5 | tr -d '\r')" "HTTP/1.1 200 OK"
+exec 5<&-
+wait $PID
+check "Ctrl+C -> exit 0"           "$?" 0
+
+# 다시 켜도 데이터가 그대로 있다 (db_close 가 파일을 닫으며 디스크로 내림)
+./build/dbms-server $PORT "$DATA" >> /tmp/dbms-e2e.log 2>&1 &
+PID=$!
+sleep 0.3
+check "data survives restart"      "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":43'
+
+# 정리가 오래 걸려도(요청을 덜 보낸 손님) Ctrl+C 를 한 번 더 누르면 바로 끝난다.
+exec 6<>"/dev/tcp/127.0.0.1/$PORT"
+sleep 0.3
+kill -INT $PID
+sleep 0.3
+kill -INT $PID
+wait $PID
+check "second Ctrl+C -> exit 130"  "$?" 130
+exec 6<&-
+
+rm -rf "$DATA"
+[[ $FAIL -eq 0 ]] && echo "e2e: all passed"
+exit $FAIL

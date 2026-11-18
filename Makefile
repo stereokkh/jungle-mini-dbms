@@ -1,6 +1,7 @@
 # Mini DBMS build
 #
 #   make             build/mini-dbms
+#   make server      Phase 3 API 서버 (CDH/dbms 의 Makefile 로 빌드 → CDH/dbms/build/dbms-server)
 #   make test        tests/test_*.c 를 각각 빌드해서 실행
 #   make asan        AddressSanitizer/UBSan 빌드로 make test 실행
 #   make clean
@@ -25,7 +26,7 @@ BIN         := $(BUILD)/mini-dbms
 
 SAN_FLAGS   := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test asan clean
+.PHONY: all server test asan clean
 
 all: $(BIN)
 
@@ -33,11 +34,15 @@ $(BUILD):
 	mkdir -p $@
 
 $(BIN): $(SRCS) $(HDRS) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -pthread -o $@ $(SRCS) $(LDFLAGS)
+
+# 세 PR(#4·#5·#6)을 합치면서 서버는 CDH/dbms 하나로 모았다 (CDH/dbms/MERGE.md)
+server:
+	$(MAKE) -C CDH/dbms
 
 # 단위 테스트: 테스트 파일 + main.c 를 뺀 모든 소스
 $(BUILD)/test_%: tests/test_%.c $(LIB_SRCS) $(HDRS) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB_SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -pthread -o $@ $< $(LIB_SRCS) $(LDFLAGS)
 
 test: $(TESTS)
 	@set -e; for t in $(TESTS); do echo "== $$t"; $$t; done

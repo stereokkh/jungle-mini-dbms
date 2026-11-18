@@ -354,8 +354,18 @@ DbStatus execute(Db *db, const Statement *stmt, RowCallback on_row, void *ctx,
     if (st != DB_OK) {
         return st;
     }
-    if (stmt->type == STMT_INSERT) {
-        return run_insert(t, stmt, result, err);
+    bool writing = stmt->type == STMT_INSERT;
+    int lock_status = writing ? pthread_rwlock_wrlock(&t->lock) : pthread_rwlock_rdlock(&t->lock);
+    if (lock_status != 0) {
+        return error_set(err, DB_ERR_IO, -1, "cannot lock table '%s'", t->name);
     }
-    return run_select(db, t, stmt, on_row, ctx, result, err);
+    if (t->write_failed) {
+        st = error_set(err, DB_ERR_IO, -1, "table '%s' is unavailable after a write failure", t->name);
+    } else if (writing) {
+        st = run_insert(t, stmt, result, err);
+    } else {
+        st = run_select(db, t, stmt, on_row, ctx, result, err);
+    }
+    pthread_rwlock_unlock(&t->lock);
+    return st;
 }
