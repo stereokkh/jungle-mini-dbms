@@ -20,6 +20,7 @@ const char *http_reason(int status)
     case 408: return "Request Timeout";
     case 413: return "Content Too Large";
     case 500: return "Internal Server Error";
+    case 503: return "Service Unavailable";
     default:  return "Unknown";
     }
 }

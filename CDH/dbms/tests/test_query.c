@@ -1,6 +1,7 @@
 // SQL 실행기(query_run) 단위 테스트. 임시 폴더에 users 테이블을 만들고 HTTP 없이 바로 부른다.
 
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,11 @@ static void setup(void)
     FILE *fp = fopen(path, "w");
     assert(fp != NULL);
     fputs("id,INT\nname,TEXT\nage,INT\n", fp);
+    fclose(fp);
+    snprintf(path, sizeof path, "%s/items.schema", dir);   // 동시성 테스트에서 처음 열 테이블
+    fp = fopen(path, "w");
+    assert(fp != NULL);
+    fputs("id,INT\nname,TEXT\n", fp);
     fclose(fp);
     assert(db_open(dir, &db, &err) == DB_OK);
 }
@@ -98,6 +104,62 @@ static void test_errors(void)
     expect_fail("  ;  ", RPC_INVALID_PARAMS, 0);
 }
 
+// [역할] table 의 행 수를 SELECT 로 센다.
+static int count_rows(const char *table)
+{
+    char sql[64];
+    QueryError qe;
+    snprintf(sql, sizeof sql, "SELECT id FROM %s;", table);
+    char *out = query_run(&db, sql, &qe);
+    assert(out != NULL);
+    const char *p = strstr(out, "\"row_count\":");
+    assert(p != NULL);
+    int n = atoi(p + 12);
+    free(out);
+    return n;
+}
+
+#define THREADS     8
+#define PER_THREAD 50
+
+// [역할] 스레드 하나가 할 일: users 에 INSERT + SELECT, items(아직 안 연 테이블)에 INSERT 를 반복.
+static void *hammer(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < PER_THREAD; i++) {
+        QueryError qe;
+        char *out = query_run(&db, "INSERT INTO users VALUES ('T', 1); "
+                                   "SELECT * FROM users WHERE id = 1; "
+                                   "INSERT INTO items VALUES ('x');", &qe);
+        if (out == NULL) {
+            fprintf(stderr, "thread query failed: %s\n", qe.message);
+            abort();
+        }
+        free(out);
+    }
+    return NULL;
+}
+
+// 3단계: 여러 스레드가 동시에 불러도 행이 사라지거나 id 가 겹치지 않는다
+static void test_concurrent(void)
+{
+    int before = count_rows("users");
+    pthread_t th[THREADS];
+
+    for (int i = 0; i < THREADS; i++) assert(pthread_create(&th[i], NULL, hammer, NULL) == 0);
+    for (int i = 0; i < THREADS; i++) pthread_join(th[i], NULL);
+
+    assert(count_rows("users") == before + THREADS * PER_THREAD);
+    assert(count_rows("items") == THREADS * PER_THREAD);
+    // id 가 겹치지 않았다면 마지막 id 는 정확히 THREADS * PER_THREAD
+    char want[128];
+    snprintf(want, sizeof want, "{\"results\":[{\"type\":\"select\",\"rows\":[[%d]],"
+             "\"columns\":[\"id\"],\"row_count\":1}]}", THREADS * PER_THREAD);
+    char sql[64];
+    snprintf(sql, sizeof sql, "SELECT id FROM items WHERE id = %d;", THREADS * PER_THREAD);
+    expect_ok(sql, want);
+}
+
 // [역할] 테스트 함수를 차례로 실행한다. assert 하나라도 실패하면 멈춘다.
 int main(void)
 {
@@ -105,6 +167,7 @@ int main(void)
     test_insert_and_select();
     test_json_escape();
     test_errors();
+    test_concurrent();
     teardown();
     printf("test_query: ok\n");
     return 0;

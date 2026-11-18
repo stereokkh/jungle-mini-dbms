@@ -12,6 +12,12 @@
 //     {"type":"select","columns":["id","name"],"rows":[[1,"Kim"]],"row_count":1}
 //   ]}
 
+//
+// 여러 스레드가 동시에 불러도 안전하다 (3단계). 문장 하나를 실행하는 동안만 락을 잡는다.
+//   - 테이블마다 rwlock: SELECT 는 읽기 락(여럿이 함께), INSERT 는 쓰기 락(혼자)
+//   - 테이블 목록 rwlock: 처음 쓰는 테이블을 목록에 등록할 때만 쓰기 락
+// 여러 문장을 묶어 보내도 한 덩어리(트랜잭션)는 아니다. 문장 사이에 다른 요청이 끼어들 수 있다.
+
 // 실패 정보
 typedef struct {
     int  code;           // JSON-RPC 오류 코드 (rpc.h 의 RPC_SQL_ERROR 등)

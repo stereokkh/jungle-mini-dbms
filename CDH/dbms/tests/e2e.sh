@@ -65,6 +65,19 @@ check "RPC errors use HTTP 200"    "$(status -X POST --data-binary '{oops' "$URL
 check "notification -> 204"        "$(status -X POST --data-binary '{"jsonrpc":"2.0","method":"ping"}' "$URL/rpc")" 204
 check "GET /rpc -> 405"            "$(status "$URL/rpc")" 405
 
+echo "[3단계] 스레드 풀"
+# 요청을 안 보내고 연결만 붙잡는 느린 손님. 반복 서버였다면 5초(TIMEOUT_SEC) 동안 다른 요청이 막힌다.
+exec 4<>"/dev/tcp/127.0.0.1/$PORT"
+check "slow client does not block" "$(status --max-time 2 "$URL/health")" 200
+exec 4<&-
+
+# 40 개 INSERT 를 동시에 보낸다. 하나도 빠지지 않고 id 도 겹치지 않아야 한다.
+JOBS=()
+for i in $(seq 1 40); do query "INSERT INTO users VALUES ('P$i', $i);" > /dev/null & JOBS+=($!); done
+wait "${JOBS[@]}"   # 그냥 wait 하면 서버(백그라운드)까지 기다려 버린다
+check "40 parallel INSERTs all saved" "$(query 'SELECT id FROM users;' | grep -o '"row_count":[0-9]*')" '"row_count":42'
+check "ids are unique (last id 42)"   "$(query 'SELECT id FROM users WHERE id = 42;' | grep -o '"row_count":[0-9]*')" '"row_count":1'
+
 kill -INT $PID
 wait $PID
 check "Ctrl+C -> exit 0"           "$?" 0
