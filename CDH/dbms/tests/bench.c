@@ -1,7 +1,7 @@
 // 부하 생성기: 클라이언트 스레드 여러 개가 서버에 같은 SQL 을 동시에 계속 보내고 속도를 잰다.
 //
 //   사용법: ./build/bench <포트> <동시 클라이언트 수> <총 요청 수> '<SQL>'
-//   출력:   한 줄 "처리량(req/s) 평균지연(ms) p99지연(ms) 오류수"
+//   출력:   한 줄 "총 소요 시간(ms) 평균지연(ms) p99지연(ms) 처리량(req/s) 오류수"
 //
 // 요청마다 연결을 새로 맺는다 (서버가 Connection: close 라서).
 // 서버 스레드 수를 바꿔 가며 같은 부하를 주면 스레드 풀의 효과를 숫자로 볼 수 있다 (bench.sh).
@@ -121,8 +121,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < total; i++) sum += g_latency[i];
     qsort(g_latency, (size_t)total, sizeof *g_latency, cmp_double);
 
-    printf("%8.0f req/s   avg %7.2f ms   p99 %7.2f ms   errors %d\n",
-           total / (elapsed / 1000.0), sum / total, g_latency[(int)(total * 0.99)], g_errors);
+    // 총 시간 = 요청 전부를 끝내는 데 걸린 시간, 평균·p99 = 요청 하나가 걸린 시간
+    printf("total %9.1f ms   avg %7.2f ms   p99 %7.2f ms   %8.0f req/s   errors %d\n",
+           elapsed, sum / total, g_latency[(int)(total * 0.99)], total / (elapsed / 1000.0), g_errors);
     free(g_latency);
     free(th);
     return g_errors ? 2 : 0;
